@@ -42,7 +42,7 @@ namespace mattatz.TeddySystem.Example {
 		public bool showSkeleton = true;
 		public Color skeletonColor = Color.red;
 		public float simplifyDistance = 0.05f;
-		public float jointRadius = 5f;
+		public float jointRadius = 2f;
 
 		public bool enablePhysics = true;
 		public float shapeStiffness = 0.2f;
@@ -67,12 +67,56 @@ namespace mattatz.TeddySystem.Example {
 		MeshFilter _filter;
 		MeshCollider _collider;
 
-		void Start () {
+		bool isColorInitialized = false;
+		Color puppetColor;
+
+		public void InitColor() {
+			if (isColorInitialized) return;
+			isColorInitialized = true;
+
 			var rnd = GetComponent<MeshRenderer>();
 			MaterialPropertyBlock block = new MaterialPropertyBlock();
 			rnd.GetPropertyBlock(block);
-			block.SetColor("_Color", colors[Random.Range(0, colors.Count)]);
+			puppetColor = colors[Random.Range(0, colors.Count)];
+			block.SetColor("_Color", puppetColor);
+			rnd.SetPropertyBlock(block);
+		}
 
+		void Start () {
+			InitColor();
+		}
+
+		public void ApplyTextureFront(Texture2D tex, float userScale, int w, int h) {
+			InitColor();
+
+			tex.SetPixel(0, 0, puppetColor);
+			tex.Apply();
+
+			Mesh mesh = filter.sharedMesh;
+			Vector2[] uvs = new Vector2[mesh.vertexCount];
+			float maxDim = Mathf.Max(w, h);
+
+			for (int i = 0; i < mesh.vertexCount; i++) {
+				Vector3 v = mesh.vertices[i];
+				Vector3 n = mesh.normals[i];
+
+				if (n.z < -0.1f) {
+					float Vx = v.x / userScale;
+					float Vy = v.y / userScale;
+					float u = (Vx * maxDim + w * 0.5f) / w;
+					float v_uv = (Vy * maxDim + h * 0.5f) / h;
+					uvs[i] = new Vector2(u, v_uv);
+				} else {
+					uvs[i] = new Vector2(0f, 0f);
+				}
+			}
+			mesh.uv = uvs;
+
+			var rnd = GetComponent<MeshRenderer>();
+			MaterialPropertyBlock block = new MaterialPropertyBlock();
+			rnd.GetPropertyBlock(block);
+			block.SetTexture("_MainTex", tex);
+			block.SetColor("_Color", Color.white);
 			rnd.SetPropertyBlock(block);
 		}
 

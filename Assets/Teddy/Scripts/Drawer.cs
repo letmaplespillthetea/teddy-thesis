@@ -6,6 +6,10 @@ using System.Linq;
 using System.Collections;
 using System.Collections.Generic;
 
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
+
 using mattatz.Utils;
 using mattatz.Triangulation2DSystem;
 
@@ -30,7 +34,7 @@ namespace mattatz.TeddySystem.Example {
 		[SerializeField] bool showSkeleton = true;
 		[SerializeField] Color skeletonColor = Color.red;
 		[SerializeField, Tooltip("Merge bones shorter than this distance")] float simplifyDistance = 0.05f;
-		[SerializeField, Range(2f, 16f)] float jointRadius = 5f;
+		[SerializeField, Range(2f, 16f)] float jointRadius = 2f;
 
 		[Header("Mass Spring Physics")]
 		[SerializeField] bool enableGravity = false;
@@ -77,11 +81,14 @@ namespace mattatz.TeddySystem.Example {
 			var screen = Input.mousePosition;
 			screen.z = screenZ;
 
+			Vector2 guiMouse = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
+			bool isOverUI = new Rect(10, 10, 200, 110).Contains(guiMouse);
+
 			switch(mode) {
 
 			case OperationMode.Default:
 
-				if(Input.GetMouseButtonDown(0)) {
+				if(Input.GetMouseButtonDown(0) && !isOverUI) {
 					Clear();
 
 					var ray = cam.ScreenPointToRay(screen);
@@ -122,6 +129,7 @@ namespace mattatz.TeddySystem.Example {
 					mode = OperationMode.Default;
 				} else {
 					var p = cam.ScreenToWorldPoint(screen);
+					p = transform.InverseTransformPoint(p);
 					var p2D = new Vector2(p.x, p.y);
 					if(points.Count <= 0 || Vector2.Distance(p2D, points.Last()) > threshold) {
 						points.Add(p2D);
@@ -175,6 +183,8 @@ namespace mattatz.TeddySystem.Example {
 
 			var go = Instantiate(prefab);
 			go.transform.parent = transform;
+			go.transform.localPosition = Vector3.zero;
+			go.transform.localRotation = Quaternion.identity;
 
 			var puppet = go.GetComponent<Puppet>();
 			puppet.GetComponent<Rigidbody>().useGravity = enableGravity;
@@ -210,6 +220,7 @@ namespace mattatz.TeddySystem.Example {
 
 		void OnDrawGizmos () {
 			if(points != null) {
+				Gizmos.matrix = transform.localToWorldMatrix;
 				Gizmos.color = Color.white;
 				points.ForEach(p => {
 					Gizmos.DrawSphere(p, 0.02f);
@@ -248,6 +259,37 @@ namespace mattatz.TeddySystem.Example {
 					}
 				}
 			}
+#if UNITY_EDITOR
+			if (GUI.Button(new Rect(10, 70, 200, 50), "Import PNG", style)) {
+				string path = EditorUtility.OpenFilePanel("Select PNG Image", "", "png");
+				if (!string.IsNullOrEmpty(path)) {
+					byte[] bytes = File.ReadAllBytes(path);
+					Texture2D tex = new Texture2D(2, 2);
+					tex.LoadImage(bytes);
+					
+					var pixelContour = TextureContourExtractor.ExtractContour(tex);
+					if (pixelContour.Count > 3) {
+						Clear();
+						float userScale = cam.orthographic ? 
+							(2f * cam.orthographicSize * 0.6f) : 
+							(2f * screenZ * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) * 0.6f);
+
+						foreach (var p in pixelContour) {
+							points.Add(p * userScale);
+						}
+						
+						Build();
+
+						if (puppets.Count > 0) {
+							var puppet = puppets.Last();
+							puppet.ApplyTextureFront(tex, userScale, tex.width, tex.height);
+						}
+					} else {
+						Destroy(tex);
+					}
+				}
+			}
+#endif
 		}
 
 	}

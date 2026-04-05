@@ -1,9 +1,10 @@
-﻿// Upgrade NOTE: replaced 'mul(UNITY_MATRIX_MVP,*)' with 'UnityObjectToClipPos(*)'
+// Upgrade NOTE: replaced 'mul(UNITY_MATRIX_MVP,*)' with 'UnityObjectToClipPos(*)'
 
 Shader "Teddy/Demo/Puppet" {
 
 	Properties {
 		_Color ("Color", Color) = (1, 1, 1, 1)
+		_MainTex ("Main Texture", 2D) = "white" {}
 		_Ramp ("Toon Ramp (RGB)", 2D) = "gray" {} 
 		_ToonParams ("Toon Params", Vector) = (0.47, 0.32, 1.44, -1)
 
@@ -34,6 +35,7 @@ Shader "Teddy/Demo/Puppet" {
 		};
 
 		half4 _Color;
+		sampler2D _MainTex;
 		sampler2D _Ramp;
 		half4 _ToonParams;
 		half4 _DisplacementParams;
@@ -65,7 +67,8 @@ Shader "Teddy/Demo/Puppet" {
 				d = saturate(d);
 				half3 ramp = tex2D(_Ramp, float2(d, d)).rgb;
 				ramp = pow(ramp, _ToonParams.z);
-				return half4(ramp, 1) * _Color;
+				half4 texColor = tex2D(_MainTex, IN.uv);
+				return half4(ramp * texColor.rgb, 1) * _Color;
 			}
 			ENDCG
 		}
