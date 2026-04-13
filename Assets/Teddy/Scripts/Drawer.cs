@@ -52,8 +52,38 @@ namespace mattatz.TeddySystem.Example {
 		float screenZ = 0f;
 
 		Puppet selected;
+		Puppet activePuppet;
+		bool isEditMode = false;
 		Vector3 origin;
 		Vector3 startPoint;
+
+		Texture2D colorWheel;
+		public Color selectedEditColor = Color.red;
+		float selectedValue = 1f;
+
+		void CreateColorWheel() {
+			int size = 200;
+			colorWheel = new Texture2D(size, size);
+			Vector2 center = new Vector2(size / 2f, size / 2f);
+			float radius = size / 2f;
+
+			for (int y = 0; y < size; y++) {
+				for (int x = 0; x < size; x++) {
+					Vector2 pos = new Vector2(x, y);
+					float dist = Vector2.Distance(center, pos);
+					if (dist > radius) {
+						colorWheel.SetPixel(x, y, Color.clear);
+					} else {
+						float angle = Mathf.Atan2(y - center.y, x - center.x);
+						float hue = (angle + Mathf.PI) / (2f * Mathf.PI);
+						float sat = dist / radius;
+						Color c = Color.HSVToRGB(hue, sat, 1f);
+						colorWheel.SetPixel(x, y, c);
+					}
+				}
+			}
+			colorWheel.Apply();
+		}
 
 		void Start () {
 			cam = Camera.main;
@@ -82,15 +112,15 @@ namespace mattatz.TeddySystem.Example {
 			screen.z = screenZ;
 
 			Vector2 guiMouse = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
-			bool isOverUI = new Rect(10, 10, 200, 110).Contains(guiMouse);
+			bool isOverLeftUI = new Rect(10, 10, 200, 110).Contains(guiMouse);
+			bool isOverRightUI = new Rect(Screen.width - 220, 10, 220, isEditMode ? 400 : 80).Contains(guiMouse);
+			bool isOverUI = isOverLeftUI || isOverRightUI;
 
 			switch(mode) {
 
 			case OperationMode.Default:
 
 				if(Input.GetMouseButtonDown(0) && !isOverUI) {
-					Clear();
-
 					var ray = cam.ScreenPointToRay(screen);
 					RaycastHit hit;
 
@@ -100,6 +130,7 @@ namespace mattatz.TeddySystem.Example {
 						int jIndex;
 						if (p.TryPickJoint(cam, screen, 20f, out jIndex)) {
 							selected = p;
+							activePuppet = p;
 							selected.draggingJoint = jIndex;
 							mode = OperationMode.MoveJoint;
 							jointPicked = true;
@@ -111,12 +142,18 @@ namespace mattatz.TeddySystem.Example {
 						if(Physics.Raycast(ray.origin, ray.direction, out hit, float.MaxValue)) {
 							startPoint = cam.ScreenToWorldPoint(screen);
 							selected = hit.collider.GetComponent<Puppet>();
+							activePuppet = selected;
 							selected.Select();
-							selected.OnTextureClicked(hit);
+							if (isEditMode) {
+								selected.OnTextureClicked(hit, selectedEditColor);
+							}
 							startPoint = hit.point;
 							origin = selected.transform.position;
 							mode = OperationMode.Move;
 						} else {
+							activePuppet = null;
+							isEditMode = false;
+							Clear();
 							mode = OperationMode.Draw;
 						}
 					}
@@ -250,6 +287,117 @@ namespace mattatz.TeddySystem.Example {
 			GUIStyle style = new GUIStyle(GUI.skin.button);
 			style.fontSize = 20;
 			
+			if (activePuppet != null) {
+				var renderer = activePuppet.GetComponent<MeshRenderer>();
+				if (renderer != null) {
+					Bounds b = renderer.bounds;
+					Vector3[] corners = new Vector3[8];
+					corners[0] = new Vector3(b.min.x, b.min.y, b.min.z);
+					corners[1] = new Vector3(b.max.x, b.min.y, b.min.z);
+					corners[2] = new Vector3(b.min.x, b.max.y, b.min.z);
+					corners[3] = new Vector3(b.max.x, b.max.y, b.min.z);
+					corners[4] = new Vector3(b.min.x, b.min.y, b.max.z);
+					corners[5] = new Vector3(b.max.x, b.min.y, b.max.z);
+					corners[6] = new Vector3(b.min.x, b.max.y, b.max.z);
+					corners[7] = new Vector3(b.max.x, b.max.y, b.max.z);
+
+					float minX = float.MaxValue, minY = float.MaxValue;
+					float maxX = float.MinValue, maxY = float.MinValue;
+					foreach (var c in corners) {
+						Vector3 s = Camera.main.WorldToScreenPoint(c);
+						if (s.x < minX) minX = s.x;
+						if (s.x > maxX) maxX = s.x;
+						float sy = Screen.height - s.y;
+						if (sy < minY) minY = sy;
+						if (sy > maxY) maxY = sy;
+					}
+
+					DrawRect(new Rect(minX, minY, maxX - minX, maxY - minY), 2, Color.yellow);
+				}
+			}
+			
+			GUI.enabled = (activePuppet != null);
+			if (!isEditMode) {
+				if (GUI.Button(new Rect(Screen.width - 210, 10, 200, 50), "Edit Mode", style)) {
+					isEditMode = true;
+					if (activePuppet != null) activePuppet.StartEditMode();
+				}
+			} else {
+				if (GUI.Button(new Rect(Screen.width - 210, 10, 200, 40), "Done", style)) {
+					isEditMode = false;
+				}
+				if (GUI.Button(new Rect(Screen.width - 210, 55, 95, 40), "Apply", style)) {
+					if (activePuppet != null) activePuppet.ApplyColorToLastClick(selectedEditColor);
+				}
+				if (GUI.Button(new Rect(Screen.width - 105, 55, 95, 40), "Cancel", style)) {
+					isEditMode = false;
+					if (activePuppet != null) activePuppet.CancelEditMode();
+				}
+				
+				if (colorWheel == null) CreateColorWheel();
+				Rect wheelRect = new Rect(Screen.width - 210, 100, 200, 200);
+				GUI.DrawTexture(wheelRect, colorWheel);
+				
+				Color.RGBToHSV(selectedEditColor, out float wheelH, out float wheelS, out float _);
+				float pCx = wheelRect.width / 2f;
+				float pCy = wheelRect.height / 2f;
+				float pDist = wheelS * pCx;
+				float pAngle = wheelH * 2f * Mathf.PI - Mathf.PI;
+				float pointerX = wheelRect.x + pCx + Mathf.Cos(pAngle) * pDist;
+				float pointerY = wheelRect.y + pCy - Mathf.Sin(pAngle) * pDist;
+				
+				Color prevGUIColor = GUI.color;
+				GUI.color = Color.black;
+				GUI.DrawTexture(new Rect(pointerX - 4, pointerY - 4, 8, 8), Texture2D.whiteTexture);
+				GUI.color = Color.white;
+				GUI.DrawTexture(new Rect(pointerX - 2, pointerY - 2, 4, 4), Texture2D.whiteTexture);
+				GUI.color = prevGUIColor;
+
+				Event e = Event.current;
+				if (e.isMouse && e.button == 0 && wheelRect.Contains(e.mousePosition)) {
+					if (e.type == EventType.MouseDown || e.type == EventType.MouseDrag) {
+						Vector2 localPos = e.mousePosition - new Vector2(wheelRect.x, wheelRect.y);
+						float cx = wheelRect.width / 2f;
+						float cy = wheelRect.height / 2f;
+						float dist = Vector2.Distance(localPos, new Vector2(cx, cy));
+						if (dist <= cx) {
+							float angle = Mathf.Atan2(-(localPos.y - cy), localPos.x - cx);
+							float hue = (angle + Mathf.PI) / (2f * Mathf.PI);
+							float sat = dist / cx;
+							selectedEditColor = Color.HSVToRGB(hue, sat, selectedValue);
+							if (activePuppet != null) {
+								activePuppet.isPreviewingColor = true;
+								activePuppet.UpdatePreview(selectedEditColor);
+							}
+						}
+						e.Use();
+					}
+				}
+
+				float newSlider = GUI.HorizontalSlider(new Rect(Screen.width - 210, 310, 200, 20), selectedValue, 0f, 1f);
+				if (newSlider != selectedValue) {
+					selectedValue = newSlider;
+					Color.RGBToHSV(selectedEditColor, out float h, out float s, out float curV);
+					selectedEditColor = Color.HSVToRGB(h, s, selectedValue);
+					if (activePuppet != null) {
+						activePuppet.isPreviewingColor = true;
+						activePuppet.UpdatePreview(selectedEditColor);
+					}
+				}
+
+				Color prevColor = GUI.color;
+				GUI.color = selectedEditColor;
+				GUI.DrawTexture(new Rect(Screen.width - 210, 340, 200, 40), Texture2D.whiteTexture);
+				GUI.color = prevColor;
+
+				GUIStyle labelStyle = new GUIStyle(GUI.skin.label);
+				labelStyle.alignment = TextAnchor.MiddleCenter;
+				Color textColor = (selectedEditColor.r * 0.299f + selectedEditColor.g * 0.587f + selectedEditColor.b * 0.114f) > 0.5f ? Color.black : Color.white;
+				labelStyle.normal.textColor = textColor;
+				GUI.Label(new Rect(Screen.width - 210, 340, 200, 40), "#" + ColorUtility.ToHtmlStringRGB(selectedEditColor), labelStyle);
+			}
+			GUI.enabled = true;
+
 			if (GUI.Button(new Rect(10, 10, 200, 50), "Gravity: " + (enableGravity ? "ON" : "OFF (Float)"), style)) {
 				enableGravity = !enableGravity;
 				foreach (var p in puppets) {
@@ -291,6 +439,16 @@ namespace mattatz.TeddySystem.Example {
 				}
 			}
 #endif
+		}
+
+		void DrawRect(Rect rect, int thickness, Color color) {
+			Color prev = GUI.color;
+			GUI.color = color;
+			GUI.DrawTexture(new Rect(rect.x, rect.y, rect.width, thickness), Texture2D.whiteTexture);
+			GUI.DrawTexture(new Rect(rect.x, rect.y, thickness, rect.height), Texture2D.whiteTexture);
+			GUI.DrawTexture(new Rect(rect.x, rect.y + rect.height - thickness, rect.width, thickness), Texture2D.whiteTexture);
+			GUI.DrawTexture(new Rect(rect.x + rect.width - thickness, rect.y, thickness, rect.height), Texture2D.whiteTexture);
+			GUI.color = prev;
 		}
 
 	}

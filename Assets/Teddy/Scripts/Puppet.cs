@@ -198,7 +198,86 @@ namespace mattatz.TeddySystem.Example {
 			}
 		}
 
-		public void OnTextureClicked(RaycastHit hit) {
+		public int lastClickX = -1;
+		public int lastClickY = -1;
+		public Color32[] backupPixels;
+		public Color32[] appliedPixels;
+		public Color32[] currentWorkingPixels;
+		public List<int> previewRegionIndices;
+		public List<int> boundaryIndices;
+		public bool isPreviewingColor = false;
+
+		public void StartEditMode() {
+			if (mainTexture != null) {
+				backupPixels = mainTexture.GetPixels32();
+				appliedPixels = mainTexture.GetPixels32();
+				currentWorkingPixels = mainTexture.GetPixels32();
+			}
+			previewRegionIndices = new List<int>();
+			lastClickX = -1; lastClickY = -1;
+		}
+
+		public void CancelEditMode() {
+			if (mainTexture != null && backupPixels != null) {
+				mainTexture.SetPixels32(backupPixels);
+				mainTexture.Apply();
+				backupPixels = null;
+				appliedPixels = null;
+				currentWorkingPixels = null;
+				previewRegionIndices = null;
+				boundaryIndices = null;
+				isPreviewingColor = false;
+			}
+		}
+
+		public void ResetEditMode() {
+			if (mainTexture != null && backupPixels != null) {
+				Array.Copy(backupPixels, appliedPixels, backupPixels.Length);
+				Array.Copy(backupPixels, currentWorkingPixels, backupPixels.Length);
+				mainTexture.SetPixels32(currentWorkingPixels);
+				mainTexture.Apply();
+				if (previewRegionIndices != null) previewRegionIndices.Clear();
+				if (boundaryIndices != null) boundaryIndices.Clear();
+				isPreviewingColor = false;
+				lastClickX = -1; lastClickY = -1;
+			}
+		}
+
+		public void ApplyColorToLastClick(Color32 newColor) { 
+			if (mainTexture == null || previewRegionIndices == null || previewRegionIndices.Count == 0) return;
+			// Commit only the filled color, NOT the orange boundary outline!
+			foreach (int idx in previewRegionIndices) {
+				appliedPixels[idx] = newColor; // This ignores the orange boundary if it was in currentWorkingPixels
+			}
+			Array.Copy(appliedPixels, currentWorkingPixels, currentWorkingPixels.Length);
+			mainTexture.SetPixels32(currentWorkingPixels);
+			mainTexture.Apply();
+			
+			previewRegionIndices.Clear();
+			if (boundaryIndices != null) boundaryIndices.Clear();
+			isPreviewingColor = false;
+			lastClickX = -1; lastClickY = -1;
+		}
+
+		public void UpdatePreview(Color32 newColor) {
+			if (mainTexture == null || previewRegionIndices == null || previewRegionIndices.Count == 0 || currentWorkingPixels == null) return;
+			
+			foreach(int idx in previewRegionIndices) {
+				currentWorkingPixels[idx] = isPreviewingColor ? newColor : appliedPixels[idx];
+			}
+			
+			if (!isPreviewingColor && boundaryIndices != null) {
+				Color32 orangeBorder = new Color32(255, 140, 0, 255);
+				foreach(int idx in boundaryIndices) {
+					currentWorkingPixels[idx] = orangeBorder;
+				}
+			}
+			
+			mainTexture.SetPixels32(currentWorkingPixels);
+			mainTexture.Apply();
+		}
+
+		public void OnTextureClicked(RaycastHit hit, Color32 currentColor) {
 			if (mainTexture == null) return;
 
 			Vector3 v = transform.InverseTransformPoint(hit.point);
@@ -216,21 +295,29 @@ namespace mattatz.TeddySystem.Example {
 			
 			px = Mathf.Clamp(px, 0, w - 1);
 			py = Mathf.Clamp(py, 0, h - 1);
+			
+			lastClickX = px;
+			lastClickY = py;
 
-			Color32[] pixels = mainTexture.GetPixels32();
+			if (appliedPixels != null && currentWorkingPixels != null) {
+				Array.Copy(appliedPixels, currentWorkingPixels, appliedPixels.Length);
+			}
+
 			int targetIndex = py * w + px;
-			Color32 targetColor = pixels[targetIndex];
+			Color32 targetColor = currentWorkingPixels[targetIndex];
 			string hex = ColorUtility.ToHtmlStringRGBA(targetColor);
 			
-			int count = 0;
+			if (previewRegionIndices == null) previewRegionIndices = new List<int>();
+			previewRegionIndices.Clear();
+
 			bool[] visited = new bool[w * h];
 			Queue<Vector2Int> q = new Queue<Vector2Int>();
 			q.Enqueue(new Vector2Int(px, py));
 			visited[targetIndex] = true;
+			previewRegionIndices.Add(targetIndex);
 			
 			while (q.Count > 0) {
 				Vector2Int p = q.Dequeue();
-				count++;
 				
 				Vector2Int[] dirs = { Vector2Int.up, Vector2Int.down, Vector2Int.left, Vector2Int.right };
 				foreach (var d in dirs) {
@@ -239,9 +326,15 @@ namespace mattatz.TeddySystem.Example {
 					if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
 						int nIndex = ny * w + nx;
 						if (!visited[nIndex]) {
-							Color32 c = pixels[nIndex];
-							if (c.r == targetColor.r && c.g == targetColor.g && c.b == targetColor.b && c.a == targetColor.a) {
+							Color32 c = currentWorkingPixels[nIndex];
+							int diffR = Mathf.Abs(c.r - targetColor.r);
+							int diffG = Mathf.Abs(c.g - targetColor.g);
+							int diffB = Mathf.Abs(c.b - targetColor.b);
+							int diffA = Mathf.Abs(c.a - targetColor.a);
+							
+							if (diffR <= 10 && diffG <= 10 && diffB <= 10 && diffA <= 10) {
 								visited[nIndex] = true;
+								previewRegionIndices.Add(nIndex);
 								q.Enqueue(new Vector2Int(nx, ny));
 							}
 						}
@@ -249,7 +342,25 @@ namespace mattatz.TeddySystem.Example {
 				}
 			}
 			
-			Debug.Log($"Hex: #{hex}, Same Color Area Count: {count}");
+			boundaryIndices = new List<int>();
+			HashSet<int> regionSet = new HashSet<int>(previewRegionIndices);
+			foreach(int idx in previewRegionIndices) {
+				int x = idx % w;
+				int y = idx / w;
+				bool isBoundary = false;
+				
+				if (x > 0 && !regionSet.Contains(y * w + (x - 1))) isBoundary = true;
+				if (x < w - 1 && !regionSet.Contains(y * w + (x + 1))) isBoundary = true;
+				if (y > 0 && !regionSet.Contains((y - 1) * w + x)) isBoundary = true;
+				if (y < h - 1 && !regionSet.Contains((y + 1) * w + x)) isBoundary = true;
+				if (x == 0 || x == w - 1 || y == 0 || y == h - 1) isBoundary = true;
+				
+				if (isBoundary) boundaryIndices.Add(idx);
+			}
+
+			Debug.Log($"Hex: #{hex}, Same Color Area Count: {previewRegionIndices.Count}");
+			isPreviewingColor = false;
+			UpdatePreview(currentColor);
 		}
 
 		public bool TryPickJoint(Camera cam, Vector2 mousePos, float pixelRadius, out int jointIndex) {
