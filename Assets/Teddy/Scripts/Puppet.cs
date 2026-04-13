@@ -61,6 +61,16 @@ namespace mattatz.TeddySystem.Example {
 		List<Vector3> prevWorldJoints;
 		HarmonicSkinning skinning;
 
+		// Lasso Joints: indices of joints that are pinned (non-interactable)
+		HashSet<int> pinnedJoints   = new HashSet<int>();
+		// Joints that have been explicitly included by at least one lasso draw.
+		// A joint is pinned only if it has NEVER been inside any lasso.
+		HashSet<int> lassoIncluded  = new HashSet<int>();
+		// Per-region physics. Each ApplyLasso() call creates a new region.
+		int[]        jointRegion;           // -1 = no region (uses global params)
+		List<float>  regionStiffness = new List<float>();
+		List<float>  regionDamping   = new List<float>();
+
 		[SerializeField] List<Color> colors;
 
 		Rigidbody _body;
@@ -132,20 +142,32 @@ namespace mattatz.TeddySystem.Example {
 				if (dt > 0.1f) dt = 0.1f;
 
 				for(int i = 0; i < worldJoints.Count; i++) {
+					// Pinned joints are frozen at their rest position – skip all dynamics
+					if (pinnedJoints.Contains(i)) {
+						worldJoints[i] = transform.TransformPoint(restLocalPositions[i]);
+						prevWorldJoints[i] = worldJoints[i];
+						continue;
+					}
+
 					if (i == draggingJoint) {
 						prevWorldJoints[i] = worldJoints[i];
 						continue;
 					}
 
+					float jDamp  = (jointRegion != null && jointRegion[i] >= 0)
+						? regionDamping[jointRegion[i]] : damping;
+					float jStiff = (jointRegion != null && jointRegion[i] >= 0)
+						? regionStiffness[jointRegion[i]] : shapeStiffness;
+
 					Vector3 vel = (worldJoints[i] - prevWorldJoints[i]) / dt;
 					vel.y -= gravity * dt;
-					vel *= (1f - damping);
+					vel *= (1f - jDamp);
 
 					prevWorldJoints[i] = worldJoints[i];
 					Vector3 nextPos = worldJoints[i] + vel * dt;
 
 					Vector3 targetWorld = transform.TransformPoint(restLocalPositions[i]);
-					worldJoints[i] = Vector3.Lerp(nextPos, targetWorld, shapeStiffness);
+					worldJoints[i] = Vector3.Lerp(nextPos, targetWorld, jStiff);
 				}
 
 				if (restLengths != null && boneIndices != null) {
@@ -169,8 +191,18 @@ namespace mattatz.TeddySystem.Example {
 							} else if (i1 == draggingJoint) {
 								worldJoints[i0] += offset * 2f;
 							} else {
-								worldJoints[i0] += offset;
-								worldJoints[i1] -= offset;
+								bool pin0c = pinnedJoints.Contains(i0);
+								bool pin1c = pinnedJoints.Contains(i1);
+								if (pin0c & pin1c) {
+									// both anchored - nothing moves
+								} else if (pin0c) {
+									worldJoints[i1] -= offset * 2f;
+								} else if (pin1c) {
+									worldJoints[i0] += offset * 2f;
+								} else {
+									worldJoints[i0] += offset;
+									worldJoints[i1] -= offset;
+								}
 							}
 						}
 					}
@@ -369,6 +401,9 @@ namespace mattatz.TeddySystem.Example {
 
 			float minDist = pixelRadius;
 			for (int i = 0; i < joints.Count; i++) {
+				// Skip pinned (gray) joints – they cannot be dragged
+				if (pinnedJoints.Contains(i)) continue;
+
 				Vector3 screenPos = cam.WorldToScreenPoint(transform.TransformPoint(joints[i]));
 				float dist = Vector2.Distance(mousePos, new Vector2(screenPos.x, screenPos.y));
 				if (dist < minDist) {
@@ -398,6 +433,82 @@ namespace mattatz.TeddySystem.Example {
 			body.isKinematic = false;
 		}
 
+		/// <summary>
+		/// Apply a screen-space lasso polygon. Returns the index of the new region created.
+		/// Joints inside → assigned to this region (interactable, red).
+		/// Joints outside AND not in any prior region → pinned (gray, frozen).
+		/// Physics params default to global values; caller can update via SetRegionParams().
+		/// </summary>
+		public int ApplyLasso(Camera cam, List<Vector2> lassoGUI) {
+			if (joints == null) return -1;
+			// Create a fresh region with the current global defaults
+			int newRegion = regionStiffness.Count;
+			regionStiffness.Add(shapeStiffness);
+			regionDamping.Add(damping);
+
+			for (int i = 0; i < joints.Count; i++) {
+				Vector3 screenPos = cam.WorldToScreenPoint(transform.TransformPoint(joints[i]));
+				Vector2 guiPos = new Vector2(screenPos.x, Screen.height - screenPos.y);
+				if (PointInPolygon(guiPos, lassoGUI)) {
+					// Inside: mark included, unpin, assign to new region
+					lassoIncluded.Add(i);
+					pinnedJoints.Remove(i);
+					if (jointRegion != null) jointRegion[i] = newRegion;
+				} else if (!lassoIncluded.Contains(i)) {
+					// Outside and never freed: pin
+					pinnedJoints.Add(i);
+					if (jointRegion != null) jointRegion[i] = -1;
+				}
+				// else: already in a prior region — leave untouched
+			}
+			return newRegion;
+		}
+
+		/// <summary>Returns the region index the joint belongs to (-1 = no region / global params).</summary>
+		public int GetJointRegion(int jointIndex) {
+			if (jointRegion == null || jointIndex < 0 || jointIndex >= jointRegion.Length) return -1;
+			return jointRegion[jointIndex];
+		}
+
+		/// <summary>Returns stiffness and damping for a given region (falls back to global if invalid).</summary>
+		public (float stiffness, float damping) GetRegionParams(int region) {
+			if (region < 0 || region >= regionStiffness.Count)
+				return (shapeStiffness, damping);
+			return (regionStiffness[region], regionDamping[region]);
+		}
+
+		/// <summary>Update physics params for an existing region.</summary>
+		public void SetRegionParams(int region, float stiffness, float damp) {
+			if (region < 0 || region >= regionStiffness.Count) return;
+			regionStiffness[region] = stiffness;
+			regionDamping[region]   = damp;
+		}
+
+		/// <summary>Unpin all joints, clear all regions and lasso history.</summary>
+		public void ResetLasso() {
+			pinnedJoints.Clear();
+			lassoIncluded.Clear();
+			regionStiffness.Clear();
+			regionDamping.Clear();
+			if (jointRegion != null)
+				for (int i = 0; i < jointRegion.Length; i++) jointRegion[i] = -1;
+		}
+
+		/// <summary>Even-odd ray cast point-in-polygon test (2-D screen space).</summary>
+		static bool PointInPolygon(Vector2 point, List<Vector2> polygon) {
+			int n = polygon.Count;
+			bool inside = false;
+			for (int i = 0, j = n - 1; i < n; j = i++) {
+				Vector2 vi = polygon[i];
+				Vector2 vj = polygon[j];
+				if (((vi.y > point.y) != (vj.y > point.y)) &&
+					(point.x < (vj.x - vi.x) * (point.y - vi.y) / (vj.y - vi.y) + vi.x)) {
+					inside = !inside;
+				}
+			}
+			return inside;
+		}
+
 		public void SetupSkeleton(List<(Vector3, Vector3)> bones) {
 			skeletonBones = SimplifyBones(bones);
 			joints = new List<Vector3>();
@@ -424,6 +535,12 @@ namespace mattatz.TeddySystem.Example {
 				worldJoints.Add(w);
 				prevWorldJoints.Add(w);
 			}
+
+			// Initialise per-joint region tracking (all -1 = global params)
+			jointRegion = new int[joints.Count];
+			for (int i = 0; i < joints.Count; i++) jointRegion[i] = -1;
+			regionStiffness.Clear();
+			regionDamping.Clear();
 
 			skinning = new HarmonicSkinning(filter.sharedMesh.vertices, filter.sharedMesh.triangles, skeletonBones);
 		}
@@ -548,13 +665,26 @@ namespace mattatz.TeddySystem.Example {
 				for (int i = 0; i < joints.Count; i++) {
 					Vector3 ws = cam.WorldToScreenPoint(transform.TransformPoint(joints[i]));
 					if (ws.z < 0f) continue;
-					
+
+					bool isPinned = pinnedJoints.Contains(i);
+
 					if (i == draggingJoint) {
 						GL.End();
 						lineMaterial.SetColor("_Color", Color.white);
 						lineMaterial.SetPass(0);
 						GL.Begin(GL.TRIANGLES);
 						DrawFilledDisc(ws.x, Screen.height - ws.y, jointRadius * 1.5f, 16);
+						GL.End();
+						lineMaterial.SetColor("_Color", skeletonColor);
+						lineMaterial.SetPass(0);
+						GL.Begin(GL.TRIANGLES);
+					} else if (isPinned) {
+						// Gray pinned joint
+						GL.End();
+						lineMaterial.SetColor("_Color", new Color(0.45f, 0.45f, 0.45f, 1f));
+						lineMaterial.SetPass(0);
+						GL.Begin(GL.TRIANGLES);
+						DrawFilledDisc(ws.x, Screen.height - ws.y, jointRadius, 16);
 						GL.End();
 						lineMaterial.SetColor("_Color", skeletonColor);
 						lineMaterial.SetPass(0);
@@ -580,6 +710,4 @@ namespace mattatz.TeddySystem.Example {
 		}
 
 	}
-
-
 }

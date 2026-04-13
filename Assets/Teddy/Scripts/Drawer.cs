@@ -19,7 +19,8 @@ namespace mattatz.TeddySystem.Example {
 		Default,
 		Draw,
 		Move,
-		MoveJoint
+		MoveJoint,
+		LassoJoint
 	};
 
 	public class Drawer : MonoBehaviour {
@@ -56,6 +57,21 @@ namespace mattatz.TeddySystem.Example {
 		bool isEditMode = false;
 		Vector3 origin;
 		Vector3 startPoint;
+
+		// Lasso Joints state
+		bool isLassoMode = false;
+		bool lassoStarted = false;
+		List<Vector2> lassoPoints = new List<Vector2>();
+
+		// Region Physics panel state (shown after lasso or when clicking a joint)
+		bool     showRegionPanel    = false;
+		Puppet   regionPuppet;
+		int      selectedRegion     = -1;
+		float    regionEditStiffness = 0.2f;
+		float    regionEditDamping   = 0.1f;
+
+		// For click-vs-drag detection in MoveJoint mode
+		Vector2 dragStartMousePos;
 
 		Texture2D colorWheel;
 		public Color selectedEditColor = Color.red;
@@ -112,8 +128,10 @@ namespace mattatz.TeddySystem.Example {
 			screen.z = screenZ;
 
 			Vector2 guiMouse = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
-			bool isOverLeftUI = new Rect(10, 10, 200, 110).Contains(guiMouse);
-			bool isOverRightUI = new Rect(Screen.width - 220, 10, 220, isEditMode ? 400 : 80).Contains(guiMouse);
+			bool isOverLeftUI  = new Rect(10, 10, 200, 110).Contains(guiMouse);
+			// Right panel: buttons + region panel (220 × 320 when region panel is visible)
+			bool isOverRightUI = new Rect(Screen.width - 220, 10, 220,
+				isEditMode ? 400 : (showRegionPanel ? 320 : 170)).Contains(guiMouse);
 			bool isOverUI = isOverLeftUI || isOverRightUI;
 
 			switch(mode) {
@@ -132,6 +150,7 @@ namespace mattatz.TeddySystem.Example {
 							selected = p;
 							activePuppet = p;
 							selected.draggingJoint = jIndex;
+							dragStartMousePos = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
 							mode = OperationMode.MoveJoint;
 							jointPicked = true;
 							break;
@@ -150,7 +169,8 @@ namespace mattatz.TeddySystem.Example {
 							startPoint = hit.point;
 							origin = selected.transform.position;
 							mode = OperationMode.Move;
-						} else {
+						} else if (!isLassoMode) {
+							// Only allow sketch-drawing when lasso is NOT armed
 							activePuppet = null;
 							isEditMode = false;
 							Clear();
@@ -193,13 +213,71 @@ namespace mattatz.TeddySystem.Example {
 			case OperationMode.MoveJoint:
 
 				if (Input.GetMouseButtonUp(0)) {
-					if (selected != null) selected.draggingJoint = -1;
+					if (selected != null) {
+						int jIdx = selected.draggingJoint;
+						selected.draggingJoint = -1;
+
+						// Detect click vs drag: if mouse barely moved, treat as a region-select click
+						float moved = Vector2.Distance(
+							new Vector2(Input.mousePosition.x, Input.mousePosition.y),
+							dragStartMousePos);
+						if (moved < 8f && jIdx >= 0) {
+							int region = selected.GetJointRegion(jIdx);
+							if (region >= 0) {
+								var (rs, rd) = selected.GetRegionParams(region);
+								regionEditStiffness = rs;
+								regionEditDamping   = rd;
+								selectedRegion  = region;
+								regionPuppet    = selected;
+								showRegionPanel = true;
+							}
+						}
+					}
 					selected = null;
 					mode = OperationMode.Default;
 				} else {
 					if (selected != null) {
 						Vector3 mp = cam.ScreenToWorldPoint(new Vector3(screen.x, screen.y, selected.dragZ));
 						selected.MoveJoint(mp);
+					}
+				}
+
+				break;
+
+			case OperationMode.LassoJoint:
+
+				if (!lassoStarted) {
+					if (Input.GetMouseButtonDown(0) && !isOverUI) {
+						lassoStarted = true;
+						lassoPoints.Clear();
+					}
+				} else {
+					if (Input.GetMouseButtonUp(0)) {
+						// Geometry is committed — apply, then open the physics panel
+						if (lassoPoints.Count > 2) {
+							regionPuppet = null;
+							foreach (var p in puppets) {
+								if (p == null) continue;
+								int newRegion = p.ApplyLasso(cam, lassoPoints);
+								if (newRegion >= 0 && regionPuppet == null) {
+									// Auto-open the panel for the first puppet that got a region
+									var (rs, rd) = p.GetRegionParams(newRegion);
+									regionEditStiffness = rs;
+									regionEditDamping   = rd;
+									selectedRegion  = newRegion;
+									regionPuppet    = p;
+									showRegionPanel = true;
+								}
+							}
+						}
+						lassoPoints.Clear();
+						lassoStarted = false;
+						isLassoMode  = false;
+						mode = OperationMode.Default;
+					} else if (Input.GetMouseButton(0)) {
+						Vector2 mp2 = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
+						if (lassoPoints.Count == 0 || Vector2.Distance(mp2, lassoPoints[lassoPoints.Count - 1]) > 5f)
+							lassoPoints.Add(mp2);
 					}
 				}
 
@@ -281,6 +359,29 @@ namespace mattatz.TeddySystem.Example {
 				GL.PopMatrix();
 			}
 
+			// Draw lasso outline in screen space
+			if (mode == OperationMode.LassoJoint && lassoPoints != null && lassoPoints.Count > 1) {
+				GL.PushMatrix();
+				GL.LoadPixelMatrix();
+				lineMat.SetColor("_Color", new Color(1f, 1f, 0f, 0.9f));
+				lineMat.SetPass(0);
+				GL.Begin(GL.LINES);
+				for (int i = 0; i < lassoPoints.Count - 1; i++) {
+					// lassoPoints are stored in GUI coords (y flipped), convert back to GL pixel coords
+					Vector2 a = lassoPoints[i];
+					Vector2 b = lassoPoints[i + 1];
+					GL.Vertex3(a.x, Screen.height - a.y, 0f);
+					GL.Vertex3(b.x, Screen.height - b.y, 0f);
+				}
+				// Close the loop
+				Vector2 first = lassoPoints[0];
+				Vector2 last  = lassoPoints[lassoPoints.Count - 1];
+				GL.Vertex3(last.x,  Screen.height - last.y,  0f);
+				GL.Vertex3(first.x, Screen.height - first.y, 0f);
+				GL.End();
+				GL.PopMatrix();
+			}
+
 		}
 
 		void OnGUI() {
@@ -322,6 +423,72 @@ namespace mattatz.TeddySystem.Example {
 					isEditMode = true;
 					if (activePuppet != null) activePuppet.StartEditMode();
 				}
+
+				// Lasso Joints button (only in normal play mode, not Edit Mode)
+				GUI.enabled = (puppets.Count > 0);
+				if (GUI.Button(new Rect(Screen.width - 210, 65, 200, 45), isLassoMode ? "▶ Drawing Lasso..." : "Lasso Joints", style)) {
+					if (!isLassoMode) {
+						isLassoMode = true;
+						lassoPoints.Clear();
+						mode = OperationMode.LassoJoint;
+					}
+				}
+				if (GUI.Button(new Rect(Screen.width - 210, 115, 200, 45), "Reset Joints", style)) {
+					foreach (var p in puppets) {
+						if (p != null) p.ResetLasso();
+					}
+					showRegionPanel = false;
+					if (mode == OperationMode.LassoJoint) {
+						lassoPoints.Clear();
+						lassoStarted = false;
+						isLassoMode  = false;
+						mode = OperationMode.Default;
+					}
+				}
+				GUI.enabled = true;
+
+				// ── Region Physics panel (appears after lasso or when clicking a joint) ──
+				if (showRegionPanel && regionPuppet != null && selectedRegion >= 0) {
+					float px = Screen.width - 210;
+					float py = 168f;
+					Rect panelRect = new Rect(px - 5, py - 4, 213, 120);
+
+					// Close when clicking OUTSIDE the panel
+					Event ev = Event.current;
+					if (ev.type == EventType.MouseDown && !panelRect.Contains(ev.mousePosition)) {
+						showRegionPanel = false;
+					}
+
+					GUIStyle lbl = new GUIStyle(GUI.skin.label);
+					lbl.fontSize = 16;
+					lbl.normal.textColor = Color.white;
+
+					GUI.Box(panelRect, GUIContent.none);
+					GUI.Label(new Rect(px, py, 200, 22),
+						$"Region {selectedRegion} Physics", lbl);
+
+					// Stiffness — live apply
+					GUI.Label(new Rect(px, py + 26, 200, 20),
+						$"Stiffness: {regionEditStiffness:F2}", lbl);
+					float newS = GUI.HorizontalSlider(
+						new Rect(px, py + 46, 200, 18), regionEditStiffness, 0f, 1f);
+					if (!Mathf.Approximately(newS, regionEditStiffness)) {
+						regionEditStiffness = newS;
+						regionPuppet.SetRegionParams(selectedRegion, regionEditStiffness, regionEditDamping);
+					}
+
+					// Damping — live apply
+					GUI.Label(new Rect(px, py + 68, 200, 20),
+						$"Damping:   {regionEditDamping:F2}", lbl);
+					float newD = GUI.HorizontalSlider(
+						new Rect(px, py + 88, 200, 18), regionEditDamping, 0f, 1f);
+					if (!Mathf.Approximately(newD, regionEditDamping)) {
+						regionEditDamping = newD;
+						regionPuppet.SetRegionParams(selectedRegion, regionEditStiffness, regionEditDamping);
+					}
+				}
+
+				GUI.enabled = (activePuppet != null);
 			} else {
 				if (GUI.Button(new Rect(Screen.width - 210, 10, 200, 40), "Done", style)) {
 					isEditMode = false;
