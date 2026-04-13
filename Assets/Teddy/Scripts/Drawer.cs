@@ -112,6 +112,7 @@ namespace mattatz.TeddySystem.Example {
 							startPoint = cam.ScreenToWorldPoint(screen);
 							selected = hit.collider.GetComponent<Puppet>();
 							selected.Select();
+							selected.OnTextureClicked(hit);
 							startPoint = hit.point;
 							origin = selected.transform.position;
 							mode = OperationMode.Move;

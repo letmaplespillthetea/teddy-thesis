@@ -69,6 +69,8 @@ namespace mattatz.TeddySystem.Example {
 
 		bool isColorInitialized = false;
 		Color puppetColor;
+		public float textureUserScale = 1f;
+		public Texture2D mainTexture;
 
 		public void InitColor() {
 			if (isColorInitialized) return;
@@ -88,6 +90,8 @@ namespace mattatz.TeddySystem.Example {
 
 		public void ApplyTextureFront(Texture2D tex, float userScale, int w, int h) {
 			InitColor();
+			mainTexture = tex;
+			textureUserScale = userScale;
 
 			tex.SetPixel(0, 0, puppetColor);
 			tex.Apply();
@@ -192,6 +196,60 @@ namespace mattatz.TeddySystem.Example {
 					joints[i] = restLocalPositions[i];
 				}
 			}
+		}
+
+		public void OnTextureClicked(RaycastHit hit) {
+			if (mainTexture == null) return;
+
+			Vector3 v = transform.InverseTransformPoint(hit.point);
+			int w = mainTexture.width;
+			int h = mainTexture.height;
+			float maxDim = Mathf.Max(w, h);
+			
+			float Vx = v.x / textureUserScale;
+			float Vy = v.y / textureUserScale;
+			float u = (Vx * maxDim + w * 0.5f) / w;
+			float v_uv = (Vy * maxDim + h * 0.5f) / h;
+			
+			int px = Mathf.FloorToInt(u * w);
+			int py = Mathf.FloorToInt(v_uv * h);
+			
+			px = Mathf.Clamp(px, 0, w - 1);
+			py = Mathf.Clamp(py, 0, h - 1);
+
+			Color32[] pixels = mainTexture.GetPixels32();
+			int targetIndex = py * w + px;
+			Color32 targetColor = pixels[targetIndex];
+			string hex = ColorUtility.ToHtmlStringRGBA(targetColor);
+			
+			int count = 0;
+			bool[] visited = new bool[w * h];
+			Queue<Vector2Int> q = new Queue<Vector2Int>();
+			q.Enqueue(new Vector2Int(px, py));
+			visited[targetIndex] = true;
+			
+			while (q.Count > 0) {
+				Vector2Int p = q.Dequeue();
+				count++;
+				
+				Vector2Int[] dirs = { Vector2Int.up, Vector2Int.down, Vector2Int.left, Vector2Int.right };
+				foreach (var d in dirs) {
+					int nx = p.x + d.x;
+					int ny = p.y + d.y;
+					if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+						int nIndex = ny * w + nx;
+						if (!visited[nIndex]) {
+							Color32 c = pixels[nIndex];
+							if (c.r == targetColor.r && c.g == targetColor.g && c.b == targetColor.b && c.a == targetColor.a) {
+								visited[nIndex] = true;
+								q.Enqueue(new Vector2Int(nx, ny));
+							}
+						}
+					}
+				}
+			}
+			
+			Debug.Log($"Hex: #{hex}, Same Color Area Count: {count}");
 		}
 
 		public bool TryPickJoint(Camera cam, Vector2 mousePos, float pixelRadius, out int jointIndex) {
