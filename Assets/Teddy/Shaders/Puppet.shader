@@ -59,16 +59,8 @@ Shader "Teddy/Demo/Puppet" {
 			#pragma vertex vert
 			#pragma fragment frag
 			half4 frag (v2f IN) : SV_Target {
-				float3 dx = ddx(IN.screenPos.xyz);
-				float3 dy = ddy(IN.screenPos.xyz);
-				float3 normal = normalize(cross(dx, dy));
-
-				half d = dot(normal, normalize(float3(0.5, -0.75, 0.5))) * _ToonParams.x + _ToonParams.y;
-				d = saturate(d);
-				half3 ramp = tex2D(_Ramp, float2(d, d)).rgb;
-				ramp = pow(ramp, _ToonParams.z);
 				half4 texColor = tex2D(_MainTex, IN.uv);
-				return half4(ramp * texColor.rgb, 1) * _Color;
+				return texColor * _Color;
 			}
 			ENDCG
 		}

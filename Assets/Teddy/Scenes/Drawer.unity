@@ -615,7 +615,7 @@ Transform:
   m_GameObject: {fileID: 1234193948}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: -8.64, y: 3.26, z: 0}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -638,14 +638,6 @@ MonoBehaviour:
   floor: {fileID: 225500940}
   lineMat: {fileID: 2100000, guid: 3cdb56c432dc643c99684f1e7daff9b8, type: 2}
   json: {fileID: 4900000, guid: 72f9004f4ed974c2f9937c6255a4f921, type: 3}
-  showSkeleton: 1
-  skeletonColor: {r: 1, g: 0, b: 0, a: 1}
-  simplifyDistance: 0.05
-  jointRadius: 2
-  enableGravity: 0
-  enablePhysics: 1
-  shapeStiffness: 0.2
-  damping: 0.1
 --- !u!1 &1804214272
 GameObject:
   m_ObjectHideFlags: 0

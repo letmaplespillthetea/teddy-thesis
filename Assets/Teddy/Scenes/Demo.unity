@@ -320,7 +320,7 @@ MonoBehaviour:
   showSkeleton: 1
   skeletonColor: {r: 1, g: 0, b: 0, a: 1}
   simplifyDistance: 0.05
-  jointRadius: 2
+  jointRadius: 5
 --- !u!33 &1234193951
 MeshFilter:
   m_ObjectHideFlags: 0

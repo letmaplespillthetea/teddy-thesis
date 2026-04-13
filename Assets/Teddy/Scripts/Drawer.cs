@@ -295,4 +295,3 @@ namespace mattatz.TeddySystem.Example {
 	}
 
 }
-
