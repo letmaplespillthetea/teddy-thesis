@@ -79,6 +79,10 @@ namespace mattatz.TeddySystem.Example {
 
 		// For click-vs-drag detection in MoveJoint mode
 		Vector2 dragStartMousePos;
+		
+		// --- Animation Mode ---
+		public bool isAnimationMode = false;
+		public bool isAnimDragValid = false;
 
 		Texture2D colorWheel;
 		public Color selectedEditColor = Color.red;
@@ -116,8 +120,9 @@ namespace mattatz.TeddySystem.Example {
 			screenZ = Mathf.Abs(cam.transform.position.z - transform.position.z);
 
 			points = new List<Vector2>();
-			points = JsonUtility.FromJson<JsonSerialization<Vector2>>(json.text).ToList();
-			Build();
+			// Start with an empty scene instead of loading the duck
+			// points = JsonUtility.FromJson<JsonSerialization<Vector2>>(json.text).ToList();
+			// Build();
 		}
 
 		void Update () {
@@ -132,8 +137,14 @@ namespace mattatz.TeddySystem.Example {
 				rigEditPuppet = null;
 			}
 
+			// Sync animation mode highlights
+			if (!isAnimationMode && activePuppet != null && activePuppet.animSelectedJoint >= 0) {
+				activePuppet.StopRecordingAnimation();
+			}
+
 			foreach(var p in puppets) {
 				if (p == null) continue;
+				p.isAnimationMode = isAnimationMode;
 				p.showSkeleton = showSkeleton;
 				p.skeletonColor = skeletonColor;
 				p.jointRadius = jointRadius;
@@ -153,7 +164,7 @@ namespace mattatz.TeddySystem.Example {
 			bool isOverLeftUI  = new Rect(10, 10, 200, 350).Contains(guiMouse);
 			// Right panel: buttons + region panel (220 × 320 when region panel is visible)
 			bool isOverRightUI = new Rect(Screen.width - 220, 10, 220,
-				isEditMode ? 400 : (showRegionPanel ? 320 : 170)).Contains(guiMouse);
+				isEditMode ? 400 : (showRegionPanel ? 320 : 280)).Contains(guiMouse);
 			bool isOverUI = isOverLeftUI || isOverRightUI;
 
 			switch(mode) {
@@ -165,17 +176,19 @@ namespace mattatz.TeddySystem.Example {
 					RaycastHit hit;
 
 					bool jointPicked = false;
-					foreach (var p in puppets) {
-						if (p == null) continue;
-						int jIndex;
-						if (p.TryPickJoint(cam, screen, 20f, out jIndex)) {
-							selected = p;
-							activePuppet = p;
-							selected.draggingJoint = jIndex;
-							dragStartMousePos = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
-							mode = OperationMode.MoveJoint;
-							jointPicked = true;
-							break;
+					if (!isEditMode && !isAnimationMode) {
+						foreach (var p in puppets) {
+							if (p == null) continue;
+							int jIndex;
+							if (p.TryPickJoint(cam, screen, 20f, out jIndex)) {
+								selected = p;
+								activePuppet = p;
+								selected.draggingJoint = jIndex;
+								dragStartMousePos = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+								mode = OperationMode.MoveJoint;
+								jointPicked = true;
+								break;
+							}
 						}
 					}
 
@@ -193,7 +206,7 @@ namespace mattatz.TeddySystem.Example {
 							mode = OperationMode.Move;
 						} else if (!isLassoMode) {
 							// Only allow sketch-drawing when enabled AND lasso is NOT armed
-							if (isDrawingEnabled) {
+							if (isDrawingEnabled && !isAnimationMode) {
 								activePuppet = null;
 								isEditMode = false;
 								Clear();
@@ -348,6 +361,67 @@ namespace mattatz.TeddySystem.Example {
 					rigEditPuppet.draggingJoint = -1;
 				}
 			}
+			
+			// ── Animation mode input ────────
+			if (isAnimationMode && activePuppet != null) {
+				Vector3 mouseScreen = Input.mousePosition;
+				mouseScreen.z = screenZ;
+
+				if (Input.GetMouseButtonDown(0)) {
+					if (isOverUI) {
+						isAnimDragValid = false;
+					} else {
+						isAnimDragValid = true;
+						int pickedJoint = -1;
+						int pickedBlue = -1;
+						
+						if (activePuppet.TryPickJointAny(cam, Input.mousePosition, 12f, out pickedJoint)) {
+							activePuppet.animSelectedJoint = pickedJoint;
+							activePuppet.animSelectedBluePoint = -1;
+							dragStartMousePos = new Vector2(mouseScreen.x, mouseScreen.y);
+						} else if (activePuppet.TryPickBluePoint(cam, Input.mousePosition, 12f, out pickedBlue)) {
+							activePuppet.animSelectedBluePoint = pickedBlue;
+							activePuppet.animSelectedJoint = -1;
+							dragStartMousePos = new Vector2(mouseScreen.x, mouseScreen.y);
+						} else {
+							if (activePuppet.animSelectedJoint >= 0 || activePuppet.animSelectedBluePoint >= 0) {
+								activePuppet.StartRecordingAnimation();
+								Vector3 mp = cam.ScreenToWorldPoint(new Vector3(mouseScreen.x, mouseScreen.y, activePuppet.dragZ));
+								activePuppet.MoveJoint(mp);
+							} else {
+								Ray ray = cam.ScreenPointToRay(mouseScreen);
+								RaycastHit hit;
+								if (Physics.Raycast(ray, out hit)) {
+									if (hit.collider.gameObject == activePuppet.gameObject) {
+										int bIdx = activePuppet.CreateBluePoint(hit);
+										activePuppet.animSelectedBluePoint = bIdx;
+										activePuppet.animSelectedJoint = -1;
+										activePuppet.dragZ = cam.WorldToScreenPoint(hit.point).z;
+										dragStartMousePos = new Vector2(mouseScreen.x, mouseScreen.y);
+									}
+								}
+							}
+						}
+					}
+				}
+
+				if (isAnimDragValid && Input.GetMouseButton(0) && (activePuppet.animSelectedJoint >= 0 || activePuppet.animSelectedBluePoint >= 0)) {
+					if (!activePuppet.isRecordingAnim) {
+						if (Vector2.Distance(new Vector2(mouseScreen.x, mouseScreen.y), dragStartMousePos) > 4f) {
+							activePuppet.StartRecordingAnimation();
+						}
+					}
+					
+					if (activePuppet.isRecordingAnim) {
+						Vector3 mp = cam.ScreenToWorldPoint(new Vector3(mouseScreen.x, mouseScreen.y, activePuppet.dragZ));
+						activePuppet.MoveJoint(mp);
+					}
+				}
+
+				if (Input.GetMouseButtonUp(0) && activePuppet.isRecordingAnim) {
+					activePuppet.StopRecordingAnimation();
+				}
+			}
 		}
 
 		void Build () {
@@ -379,6 +453,7 @@ namespace mattatz.TeddySystem.Example {
 			puppet.SetMesh(mesh);
 			puppet.SetupSkeleton(bones);
 			puppets.Add(puppet);
+			activePuppet = puppet;
 		}
 
 		void Clear () {
@@ -392,7 +467,7 @@ namespace mattatz.TeddySystem.Example {
 		public void Reset () {
 			puppets.ForEach(puppet => {
 				puppet.Ignore();
-				Destroy(puppet.gameObject, 10f);
+				Destroy(puppet.gameObject);
 			});
 			puppets.Clear();
 		}
@@ -481,7 +556,7 @@ namespace mattatz.TeddySystem.Example {
 			}
 			
 			// ── Normal play mode right panel ────────────────────────────────────
-			if (!isEditMode && !isRigEditMode) {
+			if (!isEditMode && !isRigEditMode && !isAnimationMode) {
 				if (GUI.Button(new Rect(Screen.width - 210, 10, 200, 50), "Edit Mode", style)) {
 					isEditMode = true;
 					if (activePuppet != null) activePuppet.StartEditMode();
@@ -517,6 +592,10 @@ namespace mattatz.TeddySystem.Example {
 					rigSelectedJoint = -1;
 					rigConnectMode   = false;
 					rigConnectFirst  = -1;
+				}
+				
+				if (GUI.Button(new Rect(Screen.width - 210, 215, 200, 45), "Anim Mode", style)) {
+					isAnimationMode = true;
 				}
 				GUI.enabled = true;
 
@@ -617,6 +696,27 @@ namespace mattatz.TeddySystem.Example {
 					rigSelectedJoint = -1;
 					rigConnectMode   = false;
 					rigConnectFirst  = -1;
+				}
+			} else if (isAnimationMode) {
+				float rx = Screen.width - 210;
+				GUIStyle lbl = new GUIStyle(GUI.skin.label);
+				lbl.fontSize = 16;
+				lbl.normal.textColor = Color.white;
+
+				GUI.Box(new Rect(rx - 5, 5, 215, 280), GUIContent.none);
+				GUI.Label(new Rect(rx, 10, 200, 24), "── Anim Mode ──", lbl);
+				
+				if (GUI.Button(new Rect(rx, 40, 200, 44), "Exit Anim Mode", style)) {
+					isAnimationMode = false;
+				}
+
+				if (activePuppet != null) {
+					if (GUI.Button(new Rect(rx, 90, 200, 44), "Clear Anims", style)) {
+						activePuppet.ClearAnimation();
+					}
+					GUI.Label(new Rect(rx, 140, 200, 24), "Frames: " + activePuppet.animMaxFrames, lbl);
+					GUI.Label(new Rect(rx, 170, 200, 24), "Current: " + activePuppet.animCurrentFrame, lbl);
+					GUI.Label(new Rect(rx, 210, 200, 60), "Click & drag a joint\nto record motion.", lbl);
 				}
 			} else {
 				if (GUI.Button(new Rect(Screen.width - 210, 10, 200, 40), "Done", style)) {
@@ -732,7 +832,7 @@ namespace mattatz.TeddySystem.Example {
 					
 					var pixelContour = TextureContourExtractor.ExtractContour(tex);
 					if (pixelContour.Count > 3) {
-						Clear();
+						Reset(); // Reset clears the scene of old models before building the new one
 						float userScale = cam.orthographic ? 
 							(2f * cam.orthographicSize * 0.6f) : 
 							(2f * screenZ * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) * 0.6f);

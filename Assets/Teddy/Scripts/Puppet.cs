@@ -53,6 +53,184 @@ namespace mattatz.TeddySystem.Example {
 		public float dragZ = 0f;
 		public int rigEditSelectedJoint = -1; // highlighted yellow in Rig Edit mode
 
+		// --- Animation Mode ---
+		public bool isAnimationMode = false;
+		public Dictionary<int, List<Vector3>> recordedMotions = new Dictionary<int, List<Vector3>>();
+		public bool isAnimationPlaying = false;
+		public class BluePoint {
+			public int v0, v1, v2;
+			public Vector3 barycentric;
+			public int attachedJoint;
+		}
+		public List<BluePoint> bluePoints = new List<BluePoint>();
+		public int animSelectedBluePoint = -1;
+		public Dictionary<int, List<Vector3>> blueRecordedMotions = new Dictionary<int, List<Vector3>>();
+
+		public int animMaxFrames = 0;
+		public int animCurrentFrame = 0;
+		public int animSelectedJoint = -1;
+		public bool isRecordingAnim = false;
+
+		public Vector3 GetBluePointWorldPos(int bIdx) {
+			if (bIdx < 0 || bIdx >= bluePoints.Count) return Vector3.zero;
+			BluePoint bp = bluePoints[bIdx];
+			Vector3[] verts = GetComponent<MeshFilter>().sharedMesh.vertices;
+			Vector3 localPos = bp.barycentric.x * verts[bp.v0] + bp.barycentric.y * verts[bp.v1] + bp.barycentric.z * verts[bp.v2];
+			return transform.TransformPoint(localPos);
+		}
+
+		public int CreateBluePoint(RaycastHit hit) {
+			BluePoint bp = new BluePoint();
+			Vector3 worldHit = hit.point;
+			Vector3 localHit = transform.InverseTransformPoint(worldHit);
+			
+			int[] triangles = GetComponent<MeshFilter>().sharedMesh.triangles;
+			Vector3[] verts = GetComponent<MeshFilter>().sharedMesh.vertices;
+			
+			bool found = false;
+			for (int i=0; i<triangles.Length; i+=3) {
+				int t0 = triangles[i];
+				int t1 = triangles[i+1];
+				int t2 = triangles[i+2];
+				Vector3 p0 = verts[t0];
+				Vector3 p1 = verts[t1];
+				Vector3 p2 = verts[t2];
+				
+				Vector2 v0 = new Vector2(p1.x - p0.x, p1.y - p0.y);
+				Vector2 v1 = new Vector2(p2.x - p0.x, p2.y - p0.y);
+				Vector2 v2 = new Vector2(localHit.x - p0.x, localHit.y - p0.y);
+				
+				float d00 = Vector2.Dot(v0, v0);
+				float d01 = Vector2.Dot(v0, v1);
+				float d11 = Vector2.Dot(v1, v1);
+				float d20 = Vector2.Dot(v2, v0);
+				float d21 = Vector2.Dot(v2, v1);
+				
+				float denom = d00 * d11 - d01 * d01;
+				if (Mathf.Abs(denom) < 1e-6f) continue;
+				
+				float v = (d11 * d20 - d01 * d21) / denom;
+				float w = (d00 * d21 - d01 * d20) / denom;
+				float u = 1.0f - v - w;
+				
+				if (u >= -0.01f && v >= -0.01f && w >= -0.01f) {
+					bp.v0 = t0; bp.v1 = t1; bp.v2 = t2;
+					u = Mathf.Clamp01(u); v = Mathf.Clamp01(v); w = Mathf.Clamp01(w);
+					float sum = u + v + w;
+					bp.barycentric = new Vector3(u/sum, v/sum, w/sum);
+					found = true;
+					break;
+				}
+			}
+			
+			if (!found) {
+				int bestV = 0; float bestVDist = float.MaxValue;
+				for (int i=0; i<verts.Length; i++) {
+					float d = Vector2.Distance(new Vector2(verts[i].x, verts[i].y), new Vector2(localHit.x, localHit.y));
+					if (d < bestVDist) { bestVDist = d; bestV = i; }
+				}
+				bp.v0 = bestV; bp.v1 = bestV; bp.v2 = bestV;
+				bp.barycentric = new Vector3(1, 0, 0);
+			}
+			
+			int bestJ = 0; float bestJDist = float.MaxValue;
+			for (int i=0; i<worldJoints.Count; i++) {
+				float d = Vector3.Distance(worldJoints[i], worldHit);
+				if (d < bestJDist) { bestJDist = d; bestJ = i; }
+			}
+			bp.attachedJoint = bestJ;
+			
+			bluePoints.Add(bp);
+			dragOffsetWorld = worldHit - worldJoints[bestJ];
+			return bluePoints.Count - 1;
+		}
+
+		public bool TryPickBluePoint(Camera cam, Vector3 screenPos, float thresholdRadius, out int pickedIndex) {
+			pickedIndex = -1;
+			float minDist = float.MaxValue;
+			for (int i = 0; i < bluePoints.Count; i++) {
+				Vector3 wPos = GetBluePointWorldPos(i);
+				Vector3 sPos = cam.WorldToScreenPoint(wPos);
+				if (sPos.z < 0f) continue;
+				float dist = Vector2.Distance(new Vector2(screenPos.x, screenPos.y), new Vector2(sPos.x, sPos.y));
+				if (dist <= thresholdRadius && dist < minDist) {
+					minDist = dist;
+					pickedIndex = i;
+					dragZ = sPos.z;
+				}
+			}
+			if (pickedIndex >= 0) {
+				Vector3 mouseWorld = cam.ScreenToWorldPoint(new Vector3(screenPos.x, screenPos.y, dragZ));
+				dragOffsetWorld = mouseWorld - worldJoints[bluePoints[pickedIndex].attachedJoint];
+			}
+			return pickedIndex >= 0;
+		}
+
+		public void StartRecordingAnimation() {
+			if (animSelectedJoint >= 0) {
+				draggingJoint = animSelectedJoint;
+				recordedMotions[animSelectedJoint] = new List<Vector3>();
+			} else if (animSelectedBluePoint >= 0) {
+				draggingJoint = bluePoints[animSelectedBluePoint].attachedJoint;
+				recordedMotions[draggingJoint] = new List<Vector3>();
+				blueRecordedMotions[animSelectedBluePoint] = new List<Vector3>();
+			} else return;
+
+			isAnimationPlaying = true;
+			isRecordingAnim = true;
+			if (animMaxFrames > 0) animCurrentFrame = 0;
+		}
+
+		public void StopRecordingAnimation() {
+			if (!isRecordingAnim) return;
+			isRecordingAnim = false;
+			draggingJoint = -1;
+
+			if (animSelectedJoint >= 0) {
+				int picked = animSelectedJoint;
+				if (animMaxFrames == 0) {
+					animMaxFrames = recordedMotions[picked].Count;
+				} else {
+					if (recordedMotions[picked].Count == 0) {
+						recordedMotions[picked].Add(worldJoints[picked]);
+					}
+					Vector3 lastPos = recordedMotions[picked].Last();
+					while (recordedMotions[picked].Count < animMaxFrames) {
+						recordedMotions[picked].Add(lastPos);
+					}
+				}
+			} else if (animSelectedBluePoint >= 0) {
+				int picked = bluePoints[animSelectedBluePoint].attachedJoint;
+				int bIdx = animSelectedBluePoint;
+				if (animMaxFrames == 0) {
+					animMaxFrames = recordedMotions[picked].Count;
+				} else {
+					if (recordedMotions[picked].Count == 0) {
+						recordedMotions[picked].Add(worldJoints[picked]);
+						blueRecordedMotions[bIdx].Add(GetBluePointWorldPos(bIdx));
+					}
+					Vector3 lastPos = recordedMotions[picked].Last();
+					Vector3 lastBP = blueRecordedMotions[bIdx].Last();
+					while (recordedMotions[picked].Count < animMaxFrames) {
+						recordedMotions[picked].Add(lastPos);
+						blueRecordedMotions[bIdx].Add(lastBP);
+					}
+				}
+			}
+		}
+
+		public void ClearAnimation() {
+			recordedMotions.Clear();
+			blueRecordedMotions.Clear();
+			bluePoints.Clear();
+			isAnimationPlaying = false;
+			animMaxFrames = 0;
+			animCurrentFrame = 0;
+			animSelectedJoint = -1;
+			animSelectedBluePoint = -1;
+			isRecordingAnim = false;
+		}
+
 		List<(Vector3, Vector3)> skeletonBones;
 		List<Vector3> joints;
 		List<Vector2Int> boneIndices;
@@ -99,12 +277,37 @@ namespace mattatz.TeddySystem.Example {
 			InitColor();
 		}
 
+		void UpdateDominantColor(Color32[] pixels, Texture2D tex) {
+			Dictionary<int, int> counts = new Dictionary<int, int>();
+			Color32 dominant = puppetColor;
+			int maxCount = 0;
+			for (int i = 1; i < pixels.Length; i++) { // skip 0
+				Color32 c = pixels[i];
+				if (c.a < 10) continue; // ignore transparent
+				int key = (c.r << 24) | (c.g << 16) | (c.b << 8) | c.a;
+				if (counts.ContainsKey(key)) {
+					counts[key]++;
+				} else {
+					counts[key] = 1;
+				}
+				if (counts[key] > maxCount) {
+					maxCount = counts[key];
+					dominant = c;
+				}
+			}
+			pixels[0] = dominant;
+			if (tex != null) {
+				tex.SetPixel(0, 0, dominant);
+			}
+		}
+
 		public void ApplyTextureFront(Texture2D tex, float userScale, int w, int h) {
 			InitColor();
 			mainTexture = tex;
 			textureUserScale = userScale;
 
-			tex.SetPixel(0, 0, puppetColor);
+			Color32[] initialPixels = tex.GetPixels32();
+			UpdateDominantColor(initialPixels, tex);
 			tex.Apply();
 
 			Mesh mesh = filter.sharedMesh;
@@ -113,15 +316,16 @@ namespace mattatz.TeddySystem.Example {
 
 			for (int i = 0; i < mesh.vertexCount; i++) {
 				Vector3 v = mesh.vertices[i];
-				Vector3 n = mesh.normals[i];
-
-				if (n.z < -0.1f) {
+				
+				if (v.z <= 0.01f) {
+					// Front and Seam
 					float Vx = v.x / userScale;
 					float Vy = v.y / userScale;
 					float u = (Vx * maxDim + w * 0.5f) / w;
 					float v_uv = (Vy * maxDim + h * 0.5f) / h;
 					uvs[i] = new Vector2(u, v_uv);
 				} else {
+					// Back: mapped to (0,0) where the dominant color will be stored
 					uvs[i] = new Vector2(0f, 0f);
 				}
 			}
@@ -142,6 +346,26 @@ namespace mattatz.TeddySystem.Example {
 				float dt = Time.deltaTime;
 				if (dt > 0.1f) dt = 0.1f;
 
+				if (isAnimationPlaying) {
+					animCurrentFrame++;
+					if (animMaxFrames > 0 && animCurrentFrame >= animMaxFrames) {
+						animCurrentFrame = 0;
+						if (isRecordingAnim) {
+							StopRecordingAnimation();
+						}
+					}
+				}
+
+				if (isRecordingAnim) {
+					if (animSelectedJoint >= 0) {
+						recordedMotions[animSelectedJoint].Add(worldJoints[animSelectedJoint]);
+					} else if (animSelectedBluePoint >= 0) {
+						int jIdx = bluePoints[animSelectedBluePoint].attachedJoint;
+						recordedMotions[jIdx].Add(worldJoints[jIdx]);
+						blueRecordedMotions[animSelectedBluePoint].Add(GetBluePointWorldPos(animSelectedBluePoint));
+					}
+				}
+
 				for(int i = 0; i < worldJoints.Count; i++) {
 					// Pinned joints are frozen at their rest position – skip all dynamics
 					if (pinnedJoints.Contains(i)) {
@@ -151,6 +375,14 @@ namespace mattatz.TeddySystem.Example {
 					}
 
 					if (i == draggingJoint) {
+						prevWorldJoints[i] = worldJoints[i];
+						continue;
+					}
+
+					if (isAnimationPlaying && recordedMotions.ContainsKey(i) && (!isRecordingAnim || i != animSelectedJoint)) {
+						int frame = animCurrentFrame;
+						if (frame >= recordedMotions[i].Count) frame = recordedMotions[i].Count - 1;
+						worldJoints[i] = recordedMotions[i][frame];
 						prevWorldJoints[i] = worldJoints[i];
 						continue;
 					}
@@ -282,6 +514,9 @@ namespace mattatz.TeddySystem.Example {
 			foreach (int idx in previewRegionIndices) {
 				appliedPixels[idx] = newColor; // This ignores the orange boundary if it was in currentWorkingPixels
 			}
+			
+			UpdateDominantColor(appliedPixels, mainTexture);
+
 			Array.Copy(appliedPixels, currentWorkingPixels, currentWorkingPixels.Length);
 			mainTexture.SetPixels32(currentWorkingPixels);
 			mainTexture.Apply();
@@ -312,6 +547,7 @@ namespace mattatz.TeddySystem.Example {
 
 		public void OnTextureClicked(RaycastHit hit, Color32 currentColor) {
 			if (mainTexture == null) return;
+			if (currentWorkingPixels == null || currentWorkingPixels.Length == 0) StartEditMode();
 
 			Vector3 v = transform.InverseTransformPoint(hit.point);
 			int w = mainTexture.width;
@@ -396,6 +632,8 @@ namespace mattatz.TeddySystem.Example {
 			UpdatePreview(currentColor);
 		}
 
+		public Vector3 dragOffsetWorld;
+
 		public bool TryPickJoint(Camera cam, Vector2 mousePos, float pixelRadius, out int jointIndex) {
 			jointIndex = -1;
 			if (joints == null || joints.Count == 0) return false;
@@ -413,12 +651,23 @@ namespace mattatz.TeddySystem.Example {
 					dragZ = screenPos.z;
 				}
 			}
+			if (jointIndex >= 0) {
+				Vector3 mouseWorld = cam.ScreenToWorldPoint(new Vector3(mousePos.x, mousePos.y, dragZ));
+				dragOffsetWorld = mouseWorld - worldJoints[jointIndex];
+			}
 			return jointIndex != -1;
 		}
 
-		public void MoveJoint(Vector3 mp) {
-			if (draggingJoint != -1 && worldJoints != null) {
-				worldJoints[draggingJoint] = mp;
+		public void MoveJoint(Vector3 targetWorld) {
+			if (animSelectedJoint >= 0) {
+				if (animSelectedJoint < worldJoints.Count) {
+					worldJoints[animSelectedJoint] = targetWorld - dragOffsetWorld;
+				}
+			} else if (animSelectedBluePoint >= 0) {
+				BluePoint bp = bluePoints[animSelectedBluePoint];
+				worldJoints[bp.attachedJoint] = targetWorld - dragOffsetWorld;
+			} else if (draggingJoint >= 0 && draggingJoint < joints.Count) {
+				worldJoints[draggingJoint] = targetWorld - dragOffsetWorld;
 			}
 		}
 
@@ -433,6 +682,10 @@ namespace mattatz.TeddySystem.Example {
 				Vector3 screenPos = cam.WorldToScreenPoint(transform.TransformPoint(joints[i]));
 				float dist = Vector2.Distance(mousePos, new Vector2(screenPos.x, screenPos.y));
 				if (dist < minDist) { minDist = dist; jointIndex = i; dragZ = screenPos.z; }
+			}
+			if (jointIndex >= 0) {
+				Vector3 mouseWorld = cam.ScreenToWorldPoint(new Vector3(mousePos.x, mousePos.y, dragZ));
+				dragOffsetWorld = mouseWorld - worldJoints[jointIndex];
 			}
 			return jointIndex != -1;
 		}
@@ -776,21 +1029,103 @@ namespace mattatz.TeddySystem.Example {
 
 			GL.Begin(GL.LINES);
 			GL.Color(skeletonColor);
-			foreach (var (start, end) in skeletonBones) {
-				Vector3 ws = cam.WorldToScreenPoint(transform.TransformPoint(start));
-				Vector3 we = cam.WorldToScreenPoint(transform.TransformPoint(end));
-				if (ws.z < 0f || we.z < 0f) continue;
-				GL.Vertex3(ws.x, Screen.height - ws.y, 0f);
-				GL.Vertex3(we.x, Screen.height - we.y, 0f);
+			if (!isAnimationMode) {
+				foreach (var (start, end) in skeletonBones) {
+					Vector3 ws = cam.WorldToScreenPoint(transform.TransformPoint(start));
+					Vector3 we = cam.WorldToScreenPoint(transform.TransformPoint(end));
+					if (ws.z < 0f || we.z < 0f) continue;
+					GL.Vertex3(ws.x, Screen.height - ws.y, 0f);
+					GL.Vertex3(we.x, Screen.height - we.y, 0f);
+				}
 			}
+			
+			// Draw Animation Paths
+			if (isAnimationMode && recordedMotions != null && recordedMotions.Count > 0) {
+				GL.End();
+				lineMaterial.SetColor("_Color", new Color(0.2f, 0.2f, 0.2f, 0.8f)); // Dark gray curves
+				lineMaterial.SetPass(0);
+				GL.Begin(GL.LINES);
+				foreach (var kvp in recordedMotions) {
+					var path = kvp.Value;
+					for (int i = 0; i < path.Count - 1; i++) {
+						Vector3 p0 = cam.WorldToScreenPoint(path[i]);
+						Vector3 p1 = cam.WorldToScreenPoint(path[i + 1]);
+						if (p0.z > 0f && p1.z > 0f) {
+							GL.Vertex3(p0.x, Screen.height - p0.y, 0f);
+							GL.Vertex3(p1.x, Screen.height - p1.y, 0f);
+						}
+					}
+					if (path.Count > 1 && animMaxFrames > 0 && (!isRecordingAnim || kvp.Key != animSelectedJoint)) {
+						Vector3 p0 = cam.WorldToScreenPoint(path[path.Count - 1]);
+						Vector3 p1 = cam.WorldToScreenPoint(path[0]);
+						if (p0.z > 0f && p1.z > 0f) {
+							GL.Vertex3(p0.x, Screen.height - p0.y, 0f);
+							GL.Vertex3(p1.x, Screen.height - p1.y, 0f);
+						}
+					}
+				}
+			}
+			
+			// Draw Blue Animation Paths
+			if (isAnimationMode && blueRecordedMotions != null && blueRecordedMotions.Count > 0) {
+				GL.End();
+				lineMaterial.SetColor("_Color", new Color(0.2f, 0.2f, 0.8f, 0.8f)); // Dark blue curves
+				lineMaterial.SetPass(0);
+				GL.Begin(GL.LINES);
+				foreach (var kvp in blueRecordedMotions) {
+					var path = kvp.Value;
+					for (int i = 0; i < path.Count - 1; i++) {
+						Vector3 p0 = cam.WorldToScreenPoint(path[i]);
+						Vector3 p1 = cam.WorldToScreenPoint(path[i + 1]);
+						if (p0.z > 0f && p1.z > 0f) {
+							GL.Vertex3(p0.x, Screen.height - p0.y, 0f);
+							GL.Vertex3(p1.x, Screen.height - p1.y, 0f);
+						}
+					}
+					if (path.Count > 1 && animMaxFrames > 0 && (!isRecordingAnim || kvp.Key != animSelectedBluePoint)) {
+						Vector3 p0 = cam.WorldToScreenPoint(path[path.Count - 1]);
+						Vector3 p1 = cam.WorldToScreenPoint(path[0]);
+						if (p0.z > 0f && p1.z > 0f) {
+							GL.Vertex3(p0.x, Screen.height - p0.y, 0f);
+							GL.Vertex3(p1.x, Screen.height - p1.y, 0f);
+						}
+					}
+				}
+			}
+			
 			GL.End();
+
+			// Draw Blue points
+			if (isAnimationMode && bluePoints != null) {
+				for (int i = 0; i < bluePoints.Count; i++) {
+					Vector3 wPos = GetBluePointWorldPos(i);
+					Vector3 ws = cam.WorldToScreenPoint(wPos);
+					if (ws.z < 0f) continue;
+					bool isControlPoint = blueRecordedMotions.ContainsKey(i) || i == animSelectedBluePoint;
+					GL.End();
+					lineMaterial.SetColor("_Color", isControlPoint ? Color.blue : new Color(0.4f, 0.4f, 0.9f, 0.5f));
+					lineMaterial.SetPass(0);
+					GL.Begin(GL.TRIANGLES);
+					DrawFilledDisc(ws.x, Screen.height - ws.y, isControlPoint ? jointRadius * 1.5f : jointRadius * 0.7f, 16);
+				}
+			}
 
 			GL.Begin(GL.TRIANGLES);
 			GL.Color(skeletonColor);
-			if (joints != null) {
-				for (int i = 0; i < joints.Count; i++) {
-					Vector3 ws = cam.WorldToScreenPoint(transform.TransformPoint(joints[i]));
+			if (worldJoints != null) {
+				for (int i = 0; i < worldJoints.Count; i++) {
+					Vector3 ws = cam.WorldToScreenPoint(worldJoints[i]);
 					if (ws.z < 0f) continue;
+
+					if (isAnimationMode) {
+						bool isControlPoint = recordedMotions.ContainsKey(i) || i == animSelectedJoint;
+						GL.End();
+						lineMaterial.SetColor("_Color", isControlPoint ? Color.red : new Color(0.6f, 0.6f, 0.6f, 0.4f));
+						lineMaterial.SetPass(0);
+						GL.Begin(GL.TRIANGLES);
+						DrawFilledDisc(ws.x, Screen.height - ws.y, isControlPoint ? jointRadius * 1.5f : jointRadius * 0.7f, 16);
+						continue;
+					}
 
 					bool isPinned = pinnedJoints.Contains(i);
 
