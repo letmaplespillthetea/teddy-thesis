@@ -51,6 +51,7 @@ namespace mattatz.TeddySystem.Example {
 
 		public int draggingJoint = -1;
 		public float dragZ = 0f;
+		public int rigEditSelectedJoint = -1; // highlighted yellow in Rig Edit mode
 
 		List<(Vector3, Vector3)> skeletonBones;
 		List<Vector3> joints;
@@ -154,9 +155,9 @@ namespace mattatz.TeddySystem.Example {
 						continue;
 					}
 
-					float jDamp  = (jointRegion != null && jointRegion[i] >= 0)
+					float jDamp  = (jointRegion != null && i < jointRegion.Length && jointRegion[i] >= 0)
 						? regionDamping[jointRegion[i]] : damping;
-					float jStiff = (jointRegion != null && jointRegion[i] >= 0)
+					float jStiff = (jointRegion != null && i < jointRegion.Length && jointRegion[i] >= 0)
 						? regionStiffness[jointRegion[i]] : shapeStiffness;
 
 					Vector3 vel = (worldJoints[i] - prevWorldJoints[i]) / dt;
@@ -421,6 +422,131 @@ namespace mattatz.TeddySystem.Example {
 			}
 		}
 
+		/// <summary>
+		/// Pick the nearest joint regardless of pinned state (for Rig Edit mode).
+		/// </summary>
+		public bool TryPickJointAny(Camera cam, Vector3 mousePos, float pixelRadius, out int jointIndex) {
+			jointIndex = -1;
+			if (joints == null || joints.Count == 0) return false;
+			float minDist = pixelRadius;
+			for (int i = 0; i < joints.Count; i++) {
+				Vector3 screenPos = cam.WorldToScreenPoint(transform.TransformPoint(joints[i]));
+				float dist = Vector2.Distance(mousePos, new Vector2(screenPos.x, screenPos.y));
+				if (dist < minDist) { minDist = dist; jointIndex = i; dragZ = screenPos.z; }
+			}
+			return jointIndex != -1;
+		}
+
+		/// <summary>
+		/// Remove a joint, auto-bridging its neighbours so the chain stays
+		/// connected, then rebuild skinning.
+		/// </summary>
+		public void RemoveJoint(int idx) {
+			if (joints == null || idx < 0 || idx >= joints.Count) return;
+
+			// 1. Collect neighbour indices connected through this joint
+			var neighbours = new List<int>();
+			foreach (var bi in boneIndices) {
+				if (bi.x == idx && !neighbours.Contains(bi.y)) neighbours.Add(bi.y);
+				if (bi.y == idx && !neighbours.Contains(bi.x)) neighbours.Add(bi.x);
+			}
+
+			// 2. Remove bones touching this joint
+			for (int i = boneIndices.Count - 1; i >= 0; i--) {
+				if (boneIndices[i].x == idx || boneIndices[i].y == idx) {
+					boneIndices.RemoveAt(i);
+					restLengths.RemoveAt(i);
+				}
+			}
+
+			// 3. Remap neighbour indices that shift after removal
+			for (int i = 0; i < neighbours.Count; i++)
+				if (neighbours[i] > idx) neighbours[i]--;
+
+			// 4. Remap ALL remaining boneIndices > idx down by 1
+			for (int i = 0; i < boneIndices.Count; i++) {
+				int x = boneIndices[i].x > idx ? boneIndices[i].x - 1 : boneIndices[i].x;
+				int y = boneIndices[i].y > idx ? boneIndices[i].y - 1 : boneIndices[i].y;
+				boneIndices[i] = new Vector2Int(x, y);
+			}
+
+			// 5. Remove the joint data
+			joints.RemoveAt(idx);
+			restLocalPositions.RemoveAt(idx);
+			worldJoints.RemoveAt(idx);
+			prevWorldJoints.RemoveAt(idx);
+
+			// 6. Rebuild jointRegion (simple sequential copy, skip removed index)
+			if (jointRegion != null) {
+				var newRegion = new int[joints.Count];
+				int dst = 0;
+				for (int i = 0; i < jointRegion.Length && dst < newRegion.Length; i++) {
+					if (i == idx) continue;
+					newRegion[dst++] = jointRegion[i];
+				}
+				jointRegion = newRegion;
+			}
+
+			// 7. Remap pinnedJoints
+			pinnedJoints.RemoveWhere(j => j == idx);
+			var newPinned = new HashSet<int>();
+			foreach (var j in pinnedJoints) newPinned.Add(j > idx ? j - 1 : j);
+			pinnedJoints = newPinned;
+
+			draggingJoint = -1;
+			rigEditSelectedJoint = -1;
+
+			// 8. Bridge neighbours: connect each pair so the chain stays intact
+			for (int a = 0; a < neighbours.Count; a++) {
+				for (int b = a + 1; b < neighbours.Count; b++) {
+					int na = neighbours[a], nb = neighbours[b];
+					if (na < 0 || nb < 0 || na >= joints.Count || nb >= joints.Count) continue;
+					bool exists = false;
+					foreach (var bi in boneIndices)
+						if ((bi.x == na && bi.y == nb) || (bi.x == nb && bi.y == na)) { exists = true; break; }
+					if (!exists) {
+						boneIndices.Add(new Vector2Int(na, nb));
+						restLengths.Add(Vector3.Distance(joints[na], joints[nb]));
+					}
+				}
+			}
+
+			RebuildSkeletonBones();
+		}
+
+		/// <summary>
+		/// Add a bone (edge) between two existing joints and rebuild skinning.
+		/// </summary>
+		public void AddBone(int i0, int i1) {
+			if (joints == null || i0 < 0 || i1 < 0 || i0 >= joints.Count || i1 >= joints.Count || i0 == i1) return;
+			// Check if bone already exists
+			foreach (var bi in boneIndices)
+				if ((bi.x == i0 && bi.y == i1) || (bi.x == i1 && bi.y == i0)) return;
+			boneIndices.Add(new Vector2Int(i0, i1));
+			restLengths.Add(Vector3.Distance(joints[i0], joints[i1]));
+			RebuildSkeletonBones();
+		}
+
+		/// <summary>
+		/// Sync skeletonBones list from boneIndices+joints, then rebuild HarmonicSkinning.
+		/// </summary>
+		void RebuildSkeletonBones() {
+			skeletonBones = new List<(Vector3, Vector3)>();
+			foreach (var bi in boneIndices)
+				skeletonBones.Add((joints[bi.x], joints[bi.y]));
+			if (filter.sharedMesh != null)
+				skinning = new HarmonicSkinning(filter.sharedMesh.vertices, filter.sharedMesh.triangles, skeletonBones);
+		}
+
+		/// <summary>Returns the joint local-space position, or Vector3.zero if invalid.</summary>
+		public Vector3 GetJointLocalPos(int idx) {
+			if (joints == null || idx < 0 || idx >= joints.Count) return Vector3.zero;
+			return joints[idx];
+		}
+
+		/// <summary>Total number of joints.</summary>
+		public int JointCount => joints == null ? 0 : joints.Count;
+
 		public void Ignore () {
 			col.enabled = false;
 		}
@@ -668,7 +794,18 @@ namespace mattatz.TeddySystem.Example {
 
 					bool isPinned = pinnedJoints.Contains(i);
 
-					if (i == draggingJoint) {
+					if (i == rigEditSelectedJoint && i != draggingJoint) {
+						// Yellow highlight for selected joint in Rig Edit mode
+						GL.End();
+						lineMaterial.SetColor("_Color", Color.yellow);
+						lineMaterial.SetPass(0);
+						GL.Begin(GL.TRIANGLES);
+						DrawFilledDisc(ws.x, Screen.height - ws.y, jointRadius * 1.8f, 16);
+						GL.End();
+						lineMaterial.SetColor("_Color", skeletonColor);
+						lineMaterial.SetPass(0);
+						GL.Begin(GL.TRIANGLES);
+					} else if (i == draggingJoint) {
 						GL.End();
 						lineMaterial.SetColor("_Color", Color.white);
 						lineMaterial.SetPass(0);

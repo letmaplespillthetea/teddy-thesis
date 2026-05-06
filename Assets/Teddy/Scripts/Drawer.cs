@@ -63,6 +63,13 @@ namespace mattatz.TeddySystem.Example {
 		bool lassoStarted = false;
 		List<Vector2> lassoPoints = new List<Vector2>();
 
+		// ── Rig Edit mode state ───────────────────────────────────────────────
+		bool isRigEditMode = false;
+		Puppet rigEditPuppet;       // puppet being edited
+		int  rigSelectedJoint = -1; // joint highlighted in yellow
+		bool rigConnectMode = false; // waiting for second joint to connect
+		int  rigConnectFirst = -1;  // first joint picked for Connect
+
 		// Region Physics panel state (shown after lasso or when clicking a joint)
 		bool     showRegionPanel    = false;
 		Puppet   regionPuppet;
@@ -101,6 +108,9 @@ namespace mattatz.TeddySystem.Example {
 			colorWheel.Apply();
 		}
 
+		public bool isDrawingEnabled = true;
+		public Vector3 currentRotation = Vector3.zero;
+
 		void Start () {
 			cam = Camera.main;
 			screenZ = Mathf.Abs(cam.transform.position.z - transform.position.z);
@@ -111,6 +121,17 @@ namespace mattatz.TeddySystem.Example {
 		}
 
 		void Update () {
+			// Apply rotation from UI sliders
+			transform.localEulerAngles = currentRotation;
+
+			// Sync selected joint highlight to puppet in Rig Edit mode
+			if (isRigEditMode && rigEditPuppet != null)
+				rigEditPuppet.rigEditSelectedJoint = rigSelectedJoint;
+			else if (!isRigEditMode && rigEditPuppet != null) {
+				rigEditPuppet.rigEditSelectedJoint = -1;
+				rigEditPuppet = null;
+			}
+
 			foreach(var p in puppets) {
 				if (p == null) continue;
 				p.showSkeleton = showSkeleton;
@@ -128,7 +149,8 @@ namespace mattatz.TeddySystem.Example {
 			screen.z = screenZ;
 
 			Vector2 guiMouse = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
-			bool isOverLeftUI  = new Rect(10, 10, 200, 110).Contains(guiMouse);
+			// Area for the new UI controls
+			bool isOverLeftUI  = new Rect(10, 10, 200, 350).Contains(guiMouse);
 			// Right panel: buttons + region panel (220 × 320 when region panel is visible)
 			bool isOverRightUI = new Rect(Screen.width - 220, 10, 220,
 				isEditMode ? 400 : (showRegionPanel ? 320 : 170)).Contains(guiMouse);
@@ -170,11 +192,13 @@ namespace mattatz.TeddySystem.Example {
 							origin = selected.transform.position;
 							mode = OperationMode.Move;
 						} else if (!isLassoMode) {
-							// Only allow sketch-drawing when lasso is NOT armed
-							activePuppet = null;
-							isEditMode = false;
-							Clear();
-							mode = OperationMode.Draw;
+							// Only allow sketch-drawing when enabled AND lasso is NOT armed
+							if (isDrawingEnabled) {
+								activePuppet = null;
+								isEditMode = false;
+								Clear();
+								mode = OperationMode.Draw;
+							}
 						}
 					}
 				}
@@ -285,6 +309,45 @@ namespace mattatz.TeddySystem.Example {
 
 			}
 
+			// ── Rig Edit mode input (runs independently of OperationMode) ────────
+			if (isRigEditMode && rigEditPuppet != null) {
+				Vector3 mouseScreen = Input.mousePosition;
+				mouseScreen.z = screenZ;
+
+				if (Input.GetMouseButtonDown(0) && !isOverUI) {
+					int picked = -1;
+					rigEditPuppet.TryPickJointAny(cam, Input.mousePosition, 24f, out picked);
+
+					if (rigConnectMode) {
+						// Second click in connect mode
+						if (picked >= 0 && picked != rigConnectFirst) {
+							rigEditPuppet.AddBone(rigConnectFirst, picked);
+							rigConnectMode = false;
+							rigConnectFirst = -1;
+							rigSelectedJoint = picked;
+						} else if (picked < 0) {
+							// Clicked empty space → cancel connect
+							rigConnectMode = false;
+							rigConnectFirst = -1;
+						}
+					} else {
+						rigSelectedJoint = picked; // select or deselect
+						if (picked >= 0) {
+							rigEditPuppet.draggingJoint = picked;
+						}
+					}
+				}
+
+				if (Input.GetMouseButton(0) && rigEditPuppet.draggingJoint >= 0) {
+					Vector3 mp = cam.ScreenToWorldPoint(
+						new Vector3(mouseScreen.x, mouseScreen.y, rigEditPuppet.dragZ));
+					rigEditPuppet.MoveJoint(mp);
+				}
+
+				if (Input.GetMouseButtonUp(0)) {
+					rigEditPuppet.draggingJoint = -1;
+				}
+			}
 		}
 
 		void Build () {
@@ -417,8 +480,8 @@ namespace mattatz.TeddySystem.Example {
 				}
 			}
 			
-			GUI.enabled = (activePuppet != null);
-			if (!isEditMode) {
+			// ── Normal play mode right panel ────────────────────────────────────
+			if (!isEditMode && !isRigEditMode) {
 				if (GUI.Button(new Rect(Screen.width - 210, 10, 200, 50), "Edit Mode", style)) {
 					isEditMode = true;
 					if (activePuppet != null) activePuppet.StartEditMode();
@@ -445,9 +508,19 @@ namespace mattatz.TeddySystem.Example {
 						mode = OperationMode.Default;
 					}
 				}
+
+				// ── Edit Rig button ─────────────────────────────────────────────
+				GUI.enabled = (activePuppet != null);
+				if (GUI.Button(new Rect(Screen.width - 210, 165, 200, 45), "Edit Rig", style)) {
+					isRigEditMode    = true;
+					rigEditPuppet    = activePuppet;
+					rigSelectedJoint = -1;
+					rigConnectMode   = false;
+					rigConnectFirst  = -1;
+				}
 				GUI.enabled = true;
 
-				// ── Region Physics panel (appears after lasso or when clicking a joint) ──
+				// ── Region Physics panel ────────────────────────────────────────
 				if (showRegionPanel && regionPuppet != null && selectedRegion >= 0) {
 					float px = Screen.width - 210;
 					float py = 168f;
@@ -488,7 +561,63 @@ namespace mattatz.TeddySystem.Example {
 					}
 				}
 
-				GUI.enabled = (activePuppet != null);
+				GUI.enabled = true;
+			} else if (isRigEditMode) {
+				// ── Rig Edit panel ────────────────────────────────────────────────
+				float rx = Screen.width - 210;
+				GUIStyle lbl = new GUIStyle(GUI.skin.label);
+				lbl.fontSize = 16;
+				lbl.normal.textColor = Color.white;
+
+				GUI.Box(new Rect(rx - 5, 5, 215, 280), GUIContent.none);
+				GUI.Label(new Rect(rx, 10, 200, 24), "─── Edit Rig ───", lbl);
+
+				string jointInfo = rigSelectedJoint >= 0
+					? $"Selected: Joint {rigSelectedJoint}"
+					: "Click a joint to select";
+				GUI.Label(new Rect(rx, 38, 200, 22), jointInfo, lbl);
+
+				if (rigConnectMode)
+					GUI.Label(new Rect(rx, 60, 200, 22), "▶ Pick 2nd joint...", lbl);
+
+				// Delete selected joint
+				GUI.enabled = rigSelectedJoint >= 0 && !rigConnectMode;
+				if (GUI.Button(new Rect(rx, 90, 200, 44), "Delete Joint", style)) {
+					rigEditPuppet.RemoveJoint(rigSelectedJoint);
+					rigSelectedJoint = -1;
+				}
+
+				// Connect two joints → new bone
+				GUI.enabled = rigSelectedJoint >= 0;
+				if (!rigConnectMode) {
+					if (GUI.Button(new Rect(rx, 140, 200, 44), "Connect →", style)) {
+						rigConnectFirst = rigSelectedJoint;
+						rigConnectMode  = true;
+					}
+				} else {
+					if (GUI.Button(new Rect(rx, 140, 200, 44), "Cancel Connect", style)) {
+						rigConnectMode  = false;
+						rigConnectFirst = -1;
+					}
+				}
+
+				// Hint
+				GUI.enabled = true;
+				GUIStyle hint = new GUIStyle(GUI.skin.label);
+				hint.fontSize = 13;
+				hint.normal.textColor = new Color(0.8f, 0.8f, 0.8f);
+				hint.wordWrap = true;
+				GUI.Label(new Rect(rx, 192, 200, 50),
+					"Drag joint to move.\nClick empty space to deselect.", hint);
+
+				// Done
+				if (GUI.Button(new Rect(rx, 245, 200, 44), "Done", style)) {
+					isRigEditMode    = false;
+					rigEditPuppet    = null;
+					rigSelectedJoint = -1;
+					rigConnectMode   = false;
+					rigConnectFirst  = -1;
+				}
 			} else {
 				if (GUI.Button(new Rect(Screen.width - 210, 10, 200, 40), "Done", style)) {
 					isEditMode = false;
@@ -565,7 +694,11 @@ namespace mattatz.TeddySystem.Example {
 			}
 			GUI.enabled = true;
 
-			if (GUI.Button(new Rect(10, 10, 200, 50), "Gravity: " + (enableGravity ? "ON" : "OFF (Float)"), style)) {
+			if (GUI.Button(new Rect(10, 10, 200, 50), "Mode: " + (isDrawingEnabled ? "DRAWING" : "VIEW ONLY"), style)) {
+				isDrawingEnabled = !isDrawingEnabled;
+			}
+
+			if (GUI.Button(new Rect(10, 70, 200, 50), "Gravity: " + (enableGravity ? "ON" : "OFF (Float)"), style)) {
 				enableGravity = !enableGravity;
 				foreach (var p in puppets) {
 					if (p != null) {
@@ -575,8 +708,22 @@ namespace mattatz.TeddySystem.Example {
 					}
 				}
 			}
+
+			if (GUI.Button(new Rect(10, 130, 200, 40), "Reset Rotation", style)) {
+				currentRotation = Vector3.zero;
+			}
+
+			GUI.Label(new Rect(10, 180, 200, 20), "Rotate X: " + currentRotation.x.ToString("F0"), style);
+			currentRotation.x = GUI.HorizontalSlider(new Rect(10, 205, 200, 20), currentRotation.x, 0f, 360f);
+
+			GUI.Label(new Rect(10, 230, 200, 20), "Rotate Y: " + currentRotation.y.ToString("F0"), style);
+			currentRotation.y = GUI.HorizontalSlider(new Rect(10, 255, 200, 20), currentRotation.y, 0f, 360f);
+
+			GUI.Label(new Rect(10, 280, 200, 20), "Rotate Z: " + currentRotation.z.ToString("F0"), style);
+			currentRotation.z = GUI.HorizontalSlider(new Rect(10, 305, 200, 20), currentRotation.z, 0f, 360f);
+
 #if UNITY_EDITOR
-			if (GUI.Button(new Rect(10, 70, 200, 50), "Import PNG", style)) {
+			if (GUI.Button(new Rect(10, 335, 200, 50), "Import PNG", style)) {
 				string path = EditorUtility.OpenFilePanel("Select PNG Image", "", "png");
 				if (!string.IsNullOrEmpty(path)) {
 					byte[] bytes = File.ReadAllBytes(path);
