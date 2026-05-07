@@ -57,7 +57,8 @@ namespace mattatz.TeddySystem.Example {
 
 		// Domain Stitching System
 		DomainStitchingSystem stitchingSystem;
-		List<List<Vector2>> multiPartContours = new List<List<Vector2>>();  // For domain stitching
+		List<List<Vector2>> multiPartContours = new List<List<Vector2>>();  // Accumulated sketches for refinement/stitching
+		List<Vector2> refinedContour = new List<Vector2>();                // Result of refinement
 
 		Camera cam;
 		float screenZ = 0f;
@@ -226,7 +227,8 @@ namespace mattatz.TeddySystem.Example {
 							if (isDrawingEnabled && !isAnimationMode) {
 								activePuppet = null;
 								isEditMode = false;
-								Clear();
+								// Clear(); // Don't clear multiPartContours here, just the current points
+								points.Clear();
 								mode = OperationMode.Draw;
 							}
 						}
@@ -256,7 +258,8 @@ namespace mattatz.TeddySystem.Example {
 			case OperationMode.WaitingForInflation:
 				if(Input.GetMouseButtonDown(0) && !isOverUI) {
 					// If clicking background while waiting, start a new drawing
-					Clear();
+					// Clear(); 
+					points.Clear();
 					mode = OperationMode.Draw;
 				}
 				break;
@@ -485,20 +488,27 @@ namespace mattatz.TeddySystem.Example {
 			// Initialize or clear the stitching system
 			stitchingSystem = new DomainStitchingSystem();
 
-			// For now, treat the drawn contour as a single part
-			// In future: support multi-part drawings (e.g., separate body and limb strokes)
-			multiPartContours.Clear();
-			multiPartContours.Add(new List<Vector2>(points));
+			// Prepare contours: if we have a refined contour, use only that. 
+			// Otherwise, use all accumulated parts.
+			var contoursToBuild = new List<List<Vector2>>();
+			if (refinedContour != null && refinedContour.Count > 3) {
+				contoursToBuild.Add(new List<Vector2>(refinedContour));
+			} else {
+				foreach (var c in multiPartContours) contoursToBuild.Add(new List<Vector2>(c));
+				if (points.Count > 3) contoursToBuild.Add(new List<Vector2>(points));
+			}
+
+			if (contoursToBuild.Count == 0) return;
 
 			// Determine if the contour is open or closed
 			List<bool> isOpenList = new List<bool>();
-			foreach (var contour in multiPartContours) {
+			foreach (var contour in contoursToBuild) {
 				float endDistance = Vector2.Distance(contour[0], contour[contour.Count - 1]);
 				isOpenList.Add(endDistance > 0.1f);
 			}
 
 			// Initialize stitching system with contours
-			stitchingSystem.InitializeFromContours(multiPartContours, isOpenList);
+			stitchingSystem.InitializeFromContours(contoursToBuild, isOpenList);
 
 			// Generate stitched mesh
 			var mesh = stitchingSystem.GenerateStitchedMesh(domainInflationAmount, smoothHeightFields);
@@ -542,6 +552,13 @@ namespace mattatz.TeddySystem.Example {
 
 		void Clear () {
 			points.Clear();
+			refinedContour.Clear();
+		}
+
+		void ClearAll() {
+			points.Clear();
+			multiPartContours.Clear();
+			refinedContour.Clear();
 		}
 
 		public void Save () {
@@ -573,11 +590,31 @@ namespace mattatz.TeddySystem.Example {
 				GL.MultMatrix (transform.localToWorldMatrix);
 				lineMat.SetColor("_Color", Color.white);
 				lineMat.SetPass(0);
+				GL.End();
+				
+				// Draw accumulated parts
+				lineMat.SetColor("_Color", new Color(1f, 1f, 1f, 0.4f));
+				lineMat.SetPass(0);
 				GL.Begin(GL.LINES);
-				for(int i = 0, n = points.Count - 1; i < n; i++) {
-					GL.Vertex(points[i]); GL.Vertex(points[i + 1]);
+				foreach (var contour in multiPartContours) {
+					for (int i = 0, n = contour.Count - 1; i < n; i++) {
+						GL.Vertex(contour[i]); GL.Vertex(contour[i + 1]);
+					}
 				}
 				GL.End();
+
+				// Draw refined contour
+				if (refinedContour != null && refinedContour.Count > 1) {
+					lineMat.SetColor("_Color", Color.cyan);
+					lineMat.SetPass(0);
+					GL.Begin(GL.LINES);
+					for (int i = 0, n = refinedContour.Count - 1; i < n; i++) {
+						GL.Vertex(refinedContour[i]); GL.Vertex(refinedContour[i + 1]);
+					}
+					GL.Vertex(refinedContour.Last()); GL.Vertex(refinedContour[0]);
+					GL.End();
+				}
+				
 				GL.PopMatrix();
 			}
 
@@ -959,27 +996,145 @@ namespace mattatz.TeddySystem.Example {
 #endif
 
 			// ── Waiting for Inflation UI ───────────────────────────────────────
+			// ── Waiting for Inflation UI ───────────────────────────────────────
 			if (mode == OperationMode.WaitingForInflation) {
 				float bw = 240f;
-				float bh = 70f;
+				float bh = 140f;
 				float bx = (Screen.width - bw) / 2f;
 				float by = Screen.height - 180f;
+
+				GUI.Box(new Rect(bx - 5, by - 5, bw + 10, bh + 10), "Sketch Session");
 
 				GUIStyle inflateStyle = new GUIStyle(style);
 				inflateStyle.fontSize = 11;
 				inflateStyle.fontStyle = FontStyle.Bold;
 				inflateStyle.normal.textColor = new Color(0.2f, 1f, 0.2f); // Bright green
 
-				if (GUI.Button(new Rect(bx, by, 104, 30), "INFLATE", inflateStyle)) {
+				if (GUI.Button(new Rect(bx, by + 10, 110, 30), "INFLATE", inflateStyle)) {
 					Build();
 					mode = OperationMode.Default;
 				}
 
-				if (GUI.Button(new Rect(bx, by + 35, 104, 21), "Cancel", style)) {
-					Clear();
+				if (GUI.Button(new Rect(bx + 120, by + 10, 110, 30), "ADD PART", style)) {
+					if (points.Count > 3) {
+						multiPartContours.Add(new List<Vector2>(points));
+						points.Clear();
+						mode = OperationMode.Draw;
+					}
+				}
+
+				if (GUI.Button(new Rect(bx, by + 45, 110, 30), "REFINE", style)) {
+					RefineSketches();
+				}
+
+				if (GUI.Button(new Rect(bx + 120, by + 45, 110, 30), "CLEAR ALL", style)) {
+					ClearAll();
+					mode = OperationMode.Default;
+				}
+
+				if (GUI.Button(new Rect(bx, by + 80, 230, 21), "Cancel Current", style)) {
+					points.Clear();
 					mode = OperationMode.Default;
 				}
 			}
+		}
+
+		/// <summary>
+		/// Merges all drawn sketches into a single outer contour (Raster-based approach)
+		/// </summary>
+		void RefineSketches() {
+			var contours = new List<List<Vector2>>(multiPartContours);
+			if (points.Count > 3) contours.Add(new List<Vector2>(points));
+
+			if (contours.Count == 0) return;
+
+			// 1. Find bounding box
+			float minX = float.MaxValue, minY = float.MaxValue;
+			float maxX = float.MinValue, maxY = float.MinValue;
+			foreach (var c in contours) {
+				foreach (var p in c) {
+					minX = Mathf.Min(minX, p.x);
+					minY = Mathf.Min(minY, p.y);
+					maxX = Mathf.Max(maxX, p.x);
+					maxY = Mathf.Max(maxY, p.y);
+				}
+			}
+
+			// Add padding
+			float width = maxX - minX;
+			float height = maxY - minY;
+			float margin = Mathf.Max(width, height) * 0.1f;
+			minX -= margin; minY -= margin; maxX += margin; maxY += margin;
+			width = maxX - minX; height = maxY - minY;
+
+			// 2. Setup Rasterization
+			int res = 512;
+			RenderTexture rt = RenderTexture.GetTemporary(res, res, 0, RenderTextureFormat.Default);
+			RenderTexture.active = rt;
+			GL.Clear(true, true, Color.clear);
+
+			// Use a simple material to draw filled polygons
+			Material mat = new Material(Shader.Find("Hidden/Internal-Colored"));
+			mat.SetPass(0);
+
+			GL.PushMatrix();
+			GL.LoadPixelMatrix(0, res, 0, res); // Map to RT pixels
+			GL.Begin(GL.TRIANGLES);
+			GL.Color(Color.white);
+
+			foreach (var c in contours) {
+				// Simple triangulation for concave polygons (Teddy's triangulation is better but this is for raster)
+				var polygon = Polygon2D.Contour(c.ToArray());
+				var triangulation = new Triangulation2D(polygon, 0f);
+				foreach (var t in triangulation.Triangles) {
+					Vector2 p0 = MapToRT(t.a.Coordinate, minX, minY, width, height, res);
+					Vector2 p1 = MapToRT(t.b.Coordinate, minX, minY, width, height, res);
+					Vector2 p2 = MapToRT(t.c.Coordinate, minX, minY, width, height, res);
+					GL.Vertex3(p0.x, p0.y, 0);
+					GL.Vertex3(p1.x, p1.y, 0);
+					GL.Vertex3(p2.x, p2.y, 0);
+				}
+			}
+			GL.End();
+			GL.PopMatrix();
+
+			// 3. Read pixels and extract contour
+			Texture2D tex = new Texture2D(res, res, TextureFormat.RGBA32, false);
+			tex.ReadPixels(new Rect(0, 0, res, res), 0, 0);
+			tex.Apply();
+
+			var rawContour = TextureContourExtractor.ExtractContour(tex);
+			
+			// 4. Transform back to world coordinates
+			refinedContour.Clear();
+			foreach (var p in rawContour) {
+				// TextureContourExtractor normalizes to [-0.5, 0.5] relative to max(w,h)
+				// We need to undo that and apply our bounding box
+				float invMax = 1f / res;
+				float px = (p.x * res) + res * 0.5f;
+				float py = (p.y * res) + res * 0.5f;
+				
+				float wx = minX + (px / (float)res) * width;
+				float wy = minY + (py / (float)res) * height;
+				refinedContour.Add(new Vector2(wx, wy));
+			}
+
+			RenderTexture.active = null;
+			RenderTexture.ReleaseTemporary(rt);
+			Destroy(tex);
+			Destroy(mat);
+
+			// Clear session
+			multiPartContours.Clear();
+			points.Clear();
+			
+			Debug.Log($"[Refine] Merged {contours.Count} sketches into 1 contour with {refinedContour.Count} points.");
+		}
+
+		Vector2 MapToRT(Vector2 p, float minX, float minY, float w, float h, int res) {
+			float x = (p.x - minX) / w * res;
+			float y = (p.y - minY) / h * res;
+			return new Vector2(x, y);
 		}
 
 		void DrawRect(Rect rect, int thickness, Color color) {
