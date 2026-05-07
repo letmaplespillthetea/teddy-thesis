@@ -58,7 +58,6 @@ namespace mattatz.TeddySystem.Example {
 		// Domain Stitching System
 		DomainStitchingSystem stitchingSystem;
 		List<List<Vector2>> multiPartContours = new List<List<Vector2>>();  // Accumulated sketches for refinement/stitching
-		List<Vector2> refinedContour = new List<Vector2>();                // Result of refinement
 
 		Camera cam;
 		float screenZ = 0f;
@@ -457,10 +456,11 @@ namespace mattatz.TeddySystem.Example {
 		}
 
 		void Build () {
-			if(points.Count < 3) return;
+			if (points.Count < 3 && multiPartContours.Count == 0) return;
 
-			points = Utils2D.Constrain(points, threshold);
-			if(points.Count < 3) return;
+			if (points.Count >= 3) {
+				points = Utils2D.Constrain(points, threshold);
+			}
 
 			if (useDomainStitching) {
 				BuildWithDomainStitching();
@@ -473,6 +473,8 @@ namespace mattatz.TeddySystem.Example {
 		/// Traditional mesh building (original Teddy method)
 		/// </summary>
 		void BuildTraditional () {
+			if (points.Count < 3) return;
+
 			teddy = new Teddy(points);
 			var mesh = teddy.Build(smoothHeightFields ? MeshSmoothingMethod.HC : MeshSmoothingMethod.None, 2, 0.2f, 0.75f);
 			var bones = teddy.GetSkeletonBones();
@@ -485,32 +487,21 @@ namespace mattatz.TeddySystem.Example {
 		/// Supports multiple body parts with proper mesh closure
 		/// </summary>
 		void BuildWithDomainStitching () {
-			// Initialize or clear the stitching system
 			stitchingSystem = new DomainStitchingSystem();
 
-			// Prepare contours: if we have a refined contour, use only that. 
-			// Otherwise, use all accumulated parts.
 			var contoursToBuild = new List<List<Vector2>>();
-			if (refinedContour != null && refinedContour.Count > 3) {
-				contoursToBuild.Add(new List<Vector2>(refinedContour));
-			} else {
-				foreach (var c in multiPartContours) contoursToBuild.Add(new List<Vector2>(c));
-				if (points.Count > 3) contoursToBuild.Add(new List<Vector2>(points));
-			}
+			foreach (var c in multiPartContours) contoursToBuild.Add(new List<Vector2>(c));
+			if (points.Count > 3) contoursToBuild.Add(new List<Vector2>(points));
 
 			if (contoursToBuild.Count == 0) return;
 
-			// Determine if the contour is open or closed
 			List<bool> isOpenList = new List<bool>();
 			foreach (var contour in contoursToBuild) {
 				float endDistance = Vector2.Distance(contour[0], contour[contour.Count - 1]);
 				isOpenList.Add(endDistance > 0.1f);
 			}
 
-			// Initialize stitching system with contours
 			stitchingSystem.InitializeFromContours(contoursToBuild, isOpenList);
-
-			// Generate stitched mesh
 			var mesh = stitchingSystem.GenerateStitchedMesh(domainInflationAmount, smoothHeightFields);
 
 			if (mesh != null) {
@@ -552,13 +543,11 @@ namespace mattatz.TeddySystem.Example {
 
 		void Clear () {
 			points.Clear();
-			refinedContour.Clear();
 		}
 
 		void ClearAll() {
 			points.Clear();
 			multiPartContours.Clear();
-			refinedContour.Clear();
 		}
 
 		public void Save () {
@@ -590,6 +579,10 @@ namespace mattatz.TeddySystem.Example {
 				GL.MultMatrix (transform.localToWorldMatrix);
 				lineMat.SetColor("_Color", Color.white);
 				lineMat.SetPass(0);
+				GL.Begin(GL.LINES);
+				for(int i = 0, n = points.Count - 1; i < n; i++) {
+					GL.Vertex(points[i]); GL.Vertex(points[i + 1]);
+				}
 				GL.End();
 				
 				// Draw accumulated parts
@@ -602,18 +595,6 @@ namespace mattatz.TeddySystem.Example {
 					}
 				}
 				GL.End();
-
-				// Draw refined contour
-				if (refinedContour != null && refinedContour.Count > 1) {
-					lineMat.SetColor("_Color", Color.cyan);
-					lineMat.SetPass(0);
-					GL.Begin(GL.LINES);
-					for (int i = 0, n = refinedContour.Count - 1; i < n; i++) {
-						GL.Vertex(refinedContour[i]); GL.Vertex(refinedContour[i + 1]);
-					}
-					GL.Vertex(refinedContour.Last()); GL.Vertex(refinedContour[0]);
-					GL.End();
-				}
 				
 				GL.PopMatrix();
 			}
@@ -1106,29 +1087,31 @@ namespace mattatz.TeddySystem.Example {
 			var rawContour = TextureContourExtractor.ExtractContour(tex);
 			
 			// 4. Transform back to world coordinates
-			refinedContour.Clear();
+			List<Vector2> refinedResult = new List<Vector2>();
 			foreach (var p in rawContour) {
-				// TextureContourExtractor normalizes to [-0.5, 0.5] relative to max(w,h)
-				// We need to undo that and apply our bounding box
-				float invMax = 1f / res;
 				float px = (p.x * res) + res * 0.5f;
 				float py = (p.y * res) + res * 0.5f;
 				
 				float wx = minX + (px / (float)res) * width;
 				float wy = minY + (py / (float)res) * height;
-				refinedContour.Add(new Vector2(wx, wy));
+				refinedResult.Add(new Vector2(wx, wy));
 			}
+
+			// 5. Simplify, Smooth and ensure closure
+			refinedResult = SketchCleaner.Clean(refinedResult, threshold);
+			refinedResult = SketchCleaner.Smooth(refinedResult, 3);
+			refinedResult = SketchCleaner.EnsureClosure(refinedResult, threshold);
 
 			RenderTexture.active = null;
 			RenderTexture.ReleaseTemporary(rt);
 			Destroy(tex);
 			Destroy(mat);
 
-			// Clear session
+			// 6. Set as the current active sketch (Auto-pass logic)
+			points = refinedResult;
 			multiPartContours.Clear();
-			points.Clear();
 			
-			Debug.Log($"[Refine] Merged {contours.Count} sketches into 1 contour with {refinedContour.Count} points.");
+			Debug.Log($"[Refine] Merged {contours.Count} sketches into 1 contour with {points.Count} points.");
 		}
 
 		Vector2 MapToRT(Vector2 p, float minX, float minY, float w, float h, int res) {

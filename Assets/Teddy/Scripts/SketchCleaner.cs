@@ -42,5 +42,27 @@ namespace mattatz.TeddySystem {
 
             return points;
         }
+
+        /// <summary>
+        /// Smooth a contour by moving points towards their neighbors (Laplacian smoothing)
+        /// </summary>
+        public static List<Vector2> Smooth(List<Vector2> points, int iterations = 3) {
+            if (points == null || points.Count < 3) return points;
+            
+            List<Vector2> smoothed = new List<Vector2>(points);
+            for (int iter = 0; iter < iterations; iter++) {
+                List<Vector2> nextIter = new List<Vector2>(smoothed.Count);
+                for (int i = 0; i < smoothed.Count; i++) {
+                    int prevIdx = (i - 1 + smoothed.Count) % smoothed.Count;
+                    int nextIdx = (i + 1) % smoothed.Count;
+                    
+                    // Simple average smoothing
+                    Vector2 p = smoothed[i] * 0.5f + (smoothed[prevIdx] + smoothed[nextIdx]) * 0.25f;
+                    nextIter.Add(p);
+                }
+                smoothed = nextIter;
+            }
+            return smoothed;
+        }
     }
 }
