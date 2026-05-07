@@ -268,8 +268,30 @@ namespace mattatz.TeddySystem.Example {
 			var rnd = GetComponent<MeshRenderer>();
 			MaterialPropertyBlock block = new MaterialPropertyBlock();
 			rnd.GetPropertyBlock(block);
-			puppetColor = colors[Random.Range(0, colors.Count)];
-			block.SetColor("_Color", puppetColor);
+			
+			puppetColor = (colors != null && colors.Count > 0) ? colors[Random.Range(0, colors.Count)] : Color.white;
+			
+			// Only set color if the shader has a _Color property
+			if (rnd.sharedMaterial != null && rnd.sharedMaterial.HasProperty("_Color")) {
+				block.SetColor("_Color", puppetColor);
+			}
+			
+			// Sync existing material properties to the block so they stay adjustable
+			if (rnd.sharedMaterial != null) {
+				if(rnd.sharedMaterial.HasProperty("_MainTex_ST")) block.SetVector("_MainTex_ST", rnd.sharedMaterial.GetVector("_MainTex_ST"));
+				if(rnd.sharedMaterial.HasProperty("_DisplacementParams")) block.SetVector("_DisplacementParams", rnd.sharedMaterial.GetVector("_DisplacementParams"));
+				if(rnd.sharedMaterial.HasProperty("_ToonParams")) block.SetVector("_ToonParams", rnd.sharedMaterial.GetVector("_ToonParams"));
+			}
+			
+			rnd.SetPropertyBlock(block);
+		}
+
+		public void SetColor(Color c) {
+			puppetColor = c;
+			var rnd = GetComponent<MeshRenderer>();
+			MaterialPropertyBlock block = new MaterialPropertyBlock();
+			rnd.GetPropertyBlock(block);
+			block.SetColor("_Color", c);
 			rnd.SetPropertyBlock(block);
 		}
 
@@ -336,6 +358,12 @@ namespace mattatz.TeddySystem.Example {
 			rnd.GetPropertyBlock(block);
 			block.SetTexture("_MainTex", tex);
 			block.SetColor("_Color", Color.white);
+
+			// Sync Tiling/Offset from material if it exists
+			if (rnd.sharedMaterial != null && rnd.sharedMaterial.HasProperty("_MainTex_ST")) {
+				block.SetVector("_MainTex_ST", rnd.sharedMaterial.GetVector("_MainTex_ST"));
+			}
+
 			rnd.SetPropertyBlock(block);
 		}
 
@@ -926,6 +954,21 @@ namespace mattatz.TeddySystem.Example {
 
 		public void SetMesh (Mesh mesh) {
 			body.mass = mesh.bounds.size.magnitude;
+			
+			// Generate default Planar UVs if missing or empty
+			if (mesh.uv == null || mesh.uv.Length == 0) {
+				Vector3[] vertices = mesh.vertices;
+				Vector2[] uvs = new Vector2[vertices.Length];
+				Bounds bounds = mesh.bounds;
+				for (int i = 0; i < vertices.Length; i++) {
+					// Map X/Y coordinates to 0-1 range based on bounds
+					float u = (vertices[i].x - bounds.min.x) / bounds.size.x;
+					float v = (vertices[i].y - bounds.min.y) / bounds.size.y;
+					uvs[i] = new Vector2(u, v);
+				}
+				mesh.uv = uvs;
+			}
+
 			filter.sharedMesh = mesh;
 
 			if(mesh.triangles.Length > 255 * 3) {

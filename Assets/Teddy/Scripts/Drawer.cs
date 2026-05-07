@@ -884,8 +884,12 @@ namespace mattatz.TeddySystem.Example {
 							float sat = dist / cx;
 							selectedEditColor = Color.HSVToRGB(hue, sat, selectedValue);
 							if (activePuppet != null) {
-								activePuppet.isPreviewingColor = true;
-								activePuppet.UpdatePreview(selectedEditColor);
+								if (activePuppet.mainTexture != null) {
+									activePuppet.isPreviewingColor = true;
+									activePuppet.UpdatePreview(selectedEditColor);
+								} else {
+									activePuppet.SetColor(selectedEditColor);
+								}
 							}
 						}
 						e.Use();

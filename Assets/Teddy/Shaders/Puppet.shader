@@ -3,8 +3,8 @@
 Shader "Teddy/Demo/Puppet" {
 
 	Properties {
-		_Color ("Color", Color) = (1, 1, 1, 1)
-		_MainTex ("Main Texture", 2D) = "white" {}
+		[MainColor] [PerRendererData] _Color ("Color", Color) = (1, 1, 1, 1)
+		[MainTexture] [PerRendererData] _MainTex ("Main Texture", 2D) = "white" {}
 		_Ramp ("Toon Ramp (RGB)", 2D) = "gray" {} 
 		_ToonParams ("Toon Params", Vector) = (0.47, 0.32, 1.44, -1)
 
@@ -36,6 +36,7 @@ Shader "Teddy/Demo/Puppet" {
 
 		half4 _Color;
 		sampler2D _MainTex;
+		float4 _MainTex_ST;
 		sampler2D _Ramp;
 		half4 _ToonParams;
 		half4 _DisplacementParams;
@@ -46,7 +47,7 @@ Shader "Teddy/Demo/Puppet" {
 			v.vertex.xyz += v.normal * snoise(v.vertex.xyz * _DisplacementParams.x + float3(0, _Time.y, 0) * _DisplacementParams.y) * _DisplacementParams.z;
 			OUT.vertex = UnityObjectToClipPos(v.vertex);
 			OUT.screenPos = ComputeScreenPos(OUT.vertex);
-			OUT.uv = v.uv;
+			OUT.uv = TRANSFORM_TEX(v.uv, _MainTex);
 
 			return OUT;
 		}
