@@ -214,13 +214,20 @@ namespace mattatz.TeddySystem.Example {
 							startPoint = cam.ScreenToWorldPoint(screen);
 							selected = hit.collider.GetComponent<Puppet>();
 							activePuppet = selected;
-							selected.Select();
-							if (isEditMode) {
-								selected.OnTextureClicked(hit, selectedEditColor);
+							
+							// If in Animation Mode, we only want to interact with joints/points, NOT move the whole model
+							if (isAnimationMode) {
+								selected.Select(); // Ensure kinematic
+								// Don't change mode to OperationMode.Move
+							} else {
+								selected.Select();
+								if (isEditMode) {
+									selected.OnTextureClicked(hit, selectedEditColor);
+								}
+								startPoint = hit.point;
+								origin = selected.transform.position;
+								mode = OperationMode.Move;
 							}
-							startPoint = hit.point;
-							origin = selected.transform.position;
-							mode = OperationMode.Move;
 						} else if (!isLassoMode) {
 							// Only allow sketch-drawing when enabled AND lasso is NOT armed
 							if (isDrawingEnabled && !isAnimationMode) {
@@ -449,8 +456,13 @@ namespace mattatz.TeddySystem.Example {
 					}
 				}
 
-				if (Input.GetMouseButtonUp(0) && activePuppet.isRecordingAnim) {
-					activePuppet.StopRecordingAnimation();
+				if (Input.GetMouseButtonUp(0)) {
+					if (activePuppet != null) {
+						if (activePuppet.isRecordingAnim) {
+							activePuppet.StopRecordingAnimation();
+						}
+						activePuppet.Unselect();
+					}
 				}
 			}
 		}
