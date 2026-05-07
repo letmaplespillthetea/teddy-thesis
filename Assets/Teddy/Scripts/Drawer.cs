@@ -608,7 +608,7 @@ namespace mattatz.TeddySystem.Example {
 
 		void OnGUI() {
 			GUIStyle style = new GUIStyle(GUI.skin.button);
-			style.fontSize = 20;
+			style.fontSize = 9;
 			
 			if (activePuppet != null) {
 				var renderer = activePuppet.GetComponent<MeshRenderer>();
@@ -663,21 +663,21 @@ namespace mattatz.TeddySystem.Example {
 
 			// ── Normal play mode right panel ────────────────────────────────────
 			if (!isEditMode && !isRigEditMode && !isAnimationMode) {
-				if (GUI.Button(new Rect(Screen.width - 210, 160, 200, 50), "Edit Mode", style)) {
+				if (GUI.Button(new Rect(Screen.width - 210, 160, 87, 22), "Edit Mode", style)) {
 					isEditMode = true;
 					if (activePuppet != null) activePuppet.StartEditMode();
 				}
 
 				// Lasso Joints button (only in normal play mode, not Edit Mode)
 				GUI.enabled = (puppets.Count > 0);
-				if (GUI.Button(new Rect(Screen.width - 210, 215, 200, 45), isLassoMode ? "▶ Drawing Lasso..." : "Lasso Joints", style)) {
+				if (GUI.Button(new Rect(Screen.width - 210, 187, 87, 20), isLassoMode ? "▶ Lasso" : "Lasso Joints", style)) {
 					if (!isLassoMode) {
 						isLassoMode = true;
 						lassoPoints.Clear();
 						mode = OperationMode.LassoJoint;
 					}
 				}
-				if (GUI.Button(new Rect(Screen.width - 210, 265, 200, 45), "Reset Joints", style)) {
+				if (GUI.Button(new Rect(Screen.width - 210, 212, 87, 20), "Reset Joints", style)) {
 					foreach (var p in puppets) {
 						if (p != null) p.ResetLasso();
 					}
@@ -692,7 +692,7 @@ namespace mattatz.TeddySystem.Example {
 
 				// ── Edit Rig button ─────────────────────────────────────────────
 				GUI.enabled = (activePuppet != null);
-				if (GUI.Button(new Rect(Screen.width - 210, 315, 200, 45), "Edit Rig", style)) {
+				if (GUI.Button(new Rect(Screen.width - 210, 237, 87, 20), "Edit Rig", style)) {
 					isRigEditMode    = true;
 					rigEditPuppet    = activePuppet;
 					rigSelectedJoint = -1;
@@ -700,7 +700,7 @@ namespace mattatz.TeddySystem.Example {
 					rigConnectFirst  = -1;
 				}
 				
-				if (GUI.Button(new Rect(Screen.width - 210, 365, 200, 45), "Anim Mode", style)) {
+				if (GUI.Button(new Rect(Screen.width - 210, 262, 87, 20), "Anim Mode", style)) {
 					isAnimationMode = true;
 				}
 				GUI.enabled = true;
@@ -767,7 +767,7 @@ namespace mattatz.TeddySystem.Example {
 
 				// Delete selected joint
 				GUI.enabled = rigSelectedJoint >= 0 && !rigConnectMode;
-				if (GUI.Button(new Rect(rx, 90, 200, 44), "Delete Joint", style)) {
+				if (GUI.Button(new Rect(rx, 45, 87, 19), "Delete Joint", style)) {
 					rigEditPuppet.RemoveJoint(rigSelectedJoint);
 					rigSelectedJoint = -1;
 				}
@@ -775,12 +775,12 @@ namespace mattatz.TeddySystem.Example {
 				// Connect two joints → new bone
 				GUI.enabled = rigSelectedJoint >= 0;
 				if (!rigConnectMode) {
-					if (GUI.Button(new Rect(rx, 140, 200, 44), "Connect →", style)) {
+					if (GUI.Button(new Rect(rx, 69, 87, 19), "Connect →", style)) {
 						rigConnectFirst = rigSelectedJoint;
 						rigConnectMode  = true;
 					}
 				} else {
-					if (GUI.Button(new Rect(rx, 140, 200, 44), "Cancel Connect", style)) {
+					if (GUI.Button(new Rect(rx, 69, 87, 19), "Cancel", style)) {
 						rigConnectMode  = false;
 						rigConnectFirst = -1;
 					}
@@ -796,7 +796,7 @@ namespace mattatz.TeddySystem.Example {
 					"Drag joint to move.\nClick empty space to deselect.", hint);
 
 				// Done
-				if (GUI.Button(new Rect(rx, 245, 200, 44), "Done", style)) {
+				if (GUI.Button(new Rect(rx, 93, 87, 19), "Done", style)) {
 					isRigEditMode    = false;
 					rigEditPuppet    = null;
 					rigSelectedJoint = -1;
@@ -812,12 +812,12 @@ namespace mattatz.TeddySystem.Example {
 				GUI.Box(new Rect(rx - 5, 5, 215, 280), GUIContent.none);
 				GUI.Label(new Rect(rx, 10, 200, 24), "── Anim Mode ──", lbl);
 				
-				if (GUI.Button(new Rect(rx, 40, 200, 44), "Exit Anim Mode", style)) {
+				if (GUI.Button(new Rect(rx, 35, 87, 19), "Exit Anim Mode", style)) {
 					isAnimationMode = false;
 				}
 
 				if (activePuppet != null) {
-					if (GUI.Button(new Rect(rx, 90, 200, 44), "Clear Anims", style)) {
+					if (GUI.Button(new Rect(rx, 59, 87, 19), "Clear Anims", style)) {
 						activePuppet.ClearAnimation();
 					}
 					GUI.Label(new Rect(rx, 140, 200, 24), "Frames: " + activePuppet.animMaxFrames, lbl);
@@ -825,13 +825,13 @@ namespace mattatz.TeddySystem.Example {
 					GUI.Label(new Rect(rx, 210, 200, 60), "Click & drag a joint\nto record motion.", lbl);
 				}
 			} else {
-				if (GUI.Button(new Rect(Screen.width - 210, 10, 200, 40), "Done", style)) {
+				if (GUI.Button(new Rect(Screen.width - 210, 10, 87, 17), "Done", style)) {
 					isEditMode = false;
 				}
-				if (GUI.Button(new Rect(Screen.width - 210, 55, 95, 40), "Apply", style)) {
+				if (GUI.Button(new Rect(Screen.width - 210, 32, 41, 17), "Apply", style)) {
 					if (activePuppet != null) activePuppet.ApplyColorToLastClick(selectedEditColor);
 				}
-				if (GUI.Button(new Rect(Screen.width - 105, 55, 95, 40), "Cancel", style)) {
+				if (GUI.Button(new Rect(Screen.width - 105, 32, 41, 17), "Cancel", style)) {
 					isEditMode = false;
 					if (activePuppet != null) activePuppet.CancelEditMode();
 				}
@@ -900,11 +900,11 @@ namespace mattatz.TeddySystem.Example {
 			}
 			GUI.enabled = true;
 
-			if (GUI.Button(new Rect(10, 10, 200, 50), "Mode: " + (isDrawingEnabled ? "DRAWING" : "VIEW ONLY"), style)) {
+			if (GUI.Button(new Rect(10, 10, 87, 22), (isDrawingEnabled ? "DRAW" : "VIEW"), style)) {
 				isDrawingEnabled = !isDrawingEnabled;
 			}
 
-			if (GUI.Button(new Rect(10, 70, 200, 50), "Gravity: " + (enableGravity ? "ON" : "OFF (Float)"), style)) {
+			if (GUI.Button(new Rect(10, 37, 87, 22), "Gravity: " + (enableGravity ? "ON" : "OFF"), style)) {
 				enableGravity = !enableGravity;
 				foreach (var p in puppets) {
 					if (p != null) {
@@ -915,7 +915,7 @@ namespace mattatz.TeddySystem.Example {
 				}
 			}
 
-			if (GUI.Button(new Rect(10, 130, 200, 40), "Reset Rotation", style)) {
+			if (GUI.Button(new Rect(10, 64, 87, 17), "Reset Rot", style)) {
 				currentRotation = Vector3.zero;
 			}
 
@@ -929,7 +929,7 @@ namespace mattatz.TeddySystem.Example {
 			currentRotation.z = GUI.HorizontalSlider(new Rect(10, 305, 200, 20), currentRotation.z, 0f, 360f);
 
 #if UNITY_EDITOR
-			if (GUI.Button(new Rect(10, 335, 200, 50), "Import PNG", style)) {
+			if (GUI.Button(new Rect(10, 86, 87, 22), "Import", style)) {
 				string path = EditorUtility.OpenFilePanel("Select PNG Image", "", "png");
 				if (!string.IsNullOrEmpty(path)) {
 					byte[] bytes = File.ReadAllBytes(path);
@@ -968,16 +968,16 @@ namespace mattatz.TeddySystem.Example {
 				float by = Screen.height - 180f;
 
 				GUIStyle inflateStyle = new GUIStyle(style);
-				inflateStyle.fontSize = 26;
+				inflateStyle.fontSize = 11;
 				inflateStyle.fontStyle = FontStyle.Bold;
 				inflateStyle.normal.textColor = new Color(0.2f, 1f, 0.2f); // Bright green
 
-				if (GUI.Button(new Rect(bx, by, bw, bh), "INFLATE", inflateStyle)) {
+				if (GUI.Button(new Rect(bx, by, 104, 30), "INFLATE", inflateStyle)) {
 					Build();
 					mode = OperationMode.Default;
 				}
 
-				if (GUI.Button(new Rect(bx, by + bh + 15, bw, bh * 0.7f), "Cancel Sketch", style)) {
+				if (GUI.Button(new Rect(bx, by + 35, 104, 21), "Cancel", style)) {
 					Clear();
 					mode = OperationMode.Default;
 				}
