@@ -471,7 +471,7 @@ namespace mattatz.TeddySystem.Example {
 		/// </summary>
 		void BuildTraditional () {
 			teddy = new Teddy(points);
-			var mesh = teddy.Build(MeshSmoothingMethod.HC, 2, 0.2f, 0.75f);
+			var mesh = teddy.Build(smoothHeightFields ? MeshSmoothingMethod.HC : MeshSmoothingMethod.None, 2, 0.2f, 0.75f);
 			var bones = teddy.GetSkeletonBones();
 
 			CreatePuppet(mesh, bones);
@@ -645,7 +645,7 @@ namespace mattatz.TeddySystem.Example {
 			labelStyle.normal.textColor = Color.white;
 
 			GUI.Box(new Rect(Screen.width - 210, 10, 200, isDrawingEnabled ? 140 : 115), GUIContent.none);
-			GUI.Label(new Rect(Screen.width - 200, 15, 180, 20), "─ Domain Stitching ─", labelStyle);
+			GUI.Label(new Rect(Screen.width - 200, 15, 180, 20), "─ Mesh Generation ─", labelStyle);
 
 			bool prevStitching = useDomainStitching;
 			useDomainStitching = GUI.Toggle(new Rect(Screen.width - 200, 38, 20, 20), useDomainStitching, "Enabled");
@@ -657,9 +657,7 @@ namespace mattatz.TeddySystem.Example {
 			GUI.Label(new Rect(Screen.width - 200, 62, 180, 16), "Inflation: " + domainInflationAmount.ToString("F2"), labelStyle);
 			domainInflationAmount = GUI.HorizontalSlider(new Rect(Screen.width - 200, 82, 180, 18), domainInflationAmount, 0.1f, 2f);
 
-			GUI.enabled = useDomainStitching;
 			smoothHeightFields = GUI.Toggle(new Rect(Screen.width - 200, 105, 20, 20), smoothHeightFields, "Smooth");
-			GUI.enabled = true;
 
 			// ── Normal play mode right panel ────────────────────────────────────
 			if (!isEditMode && !isRigEditMode && !isAnimationMode) {
