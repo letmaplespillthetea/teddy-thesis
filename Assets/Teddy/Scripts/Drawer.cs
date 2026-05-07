@@ -20,7 +20,8 @@ namespace mattatz.TeddySystem.Example {
 		Draw,
 		Move,
 		MoveJoint,
-		LassoJoint
+		LassoJoint,
+		WaitingForInflation
 	};
 
 	public class Drawer : MonoBehaviour {
@@ -43,11 +44,20 @@ namespace mattatz.TeddySystem.Example {
 		[SerializeField, Range(0f, 1f)] float shapeStiffness = 0.2f;
 		[SerializeField, Range(0f, 1f)] float damping = 0.1f;
 
+		[Header("Domain Stitching (Advanced)")]
+		[SerializeField] bool useDomainStitching = false;
+		[SerializeField, Range(0.1f, 2f)] float domainInflationAmount = 1.0f;
+		[SerializeField] bool smoothHeightFields = true;
+
 		OperationMode mode;
 
 		Teddy teddy;
 		List<Vector2> points;
 		List<Puppet> puppets = new List<Puppet>();
+
+		// Domain Stitching System
+		DomainStitchingSystem stitchingSystem;
+		List<List<Vector2>> multiPartContours = new List<List<Vector2>>();  // For domain stitching
 
 		Camera cam;
 		float screenZ = 0f;
@@ -165,7 +175,14 @@ namespace mattatz.TeddySystem.Example {
 			// Right panel: buttons + region panel (220 × 320 when region panel is visible)
 			bool isOverRightUI = new Rect(Screen.width - 220, 10, 220,
 				isEditMode ? 400 : (showRegionPanel ? 320 : 280)).Contains(guiMouse);
-			bool isOverUI = isOverLeftUI || isOverRightUI;
+			
+			// Inflation buttons in center bottom
+			bool isOverCenterUI = false;
+			if (mode == OperationMode.WaitingForInflation) {
+				isOverCenterUI = new Rect((Screen.width - 240) / 2f, Screen.height - 180f, 240, 140).Contains(guiMouse);
+			}
+
+			bool isOverUI = isOverLeftUI || isOverRightUI || isOverCenterUI;
 
 			switch(mode) {
 
@@ -220,8 +237,12 @@ namespace mattatz.TeddySystem.Example {
 
 			case OperationMode.Draw:
 				if(Input.GetMouseButtonUp(0)) {
-					Build();
-					mode = OperationMode.Default;
+					if (points.Count > 3) {
+						mode = OperationMode.WaitingForInflation;
+					} else {
+						points.Clear();
+						mode = OperationMode.Default;
+					}
 				} else {
 					var p = cam.ScreenToWorldPoint(screen);
 					p = transform.InverseTransformPoint(p);
@@ -229,6 +250,14 @@ namespace mattatz.TeddySystem.Example {
 					if(points.Count <= 0 || Vector2.Distance(p2D, points.Last()) > threshold) {
 						points.Add(p2D);
 					}
+				}
+				break;
+
+			case OperationMode.WaitingForInflation:
+				if(Input.GetMouseButtonDown(0) && !isOverUI) {
+					// If clicking background while waiting, start a new drawing
+					Clear();
+					mode = OperationMode.Draw;
 				}
 				break;
 
@@ -430,10 +459,65 @@ namespace mattatz.TeddySystem.Example {
 			points = Utils2D.Constrain(points, threshold);
 			if(points.Count < 3) return;
 
+			if (useDomainStitching) {
+				BuildWithDomainStitching();
+			} else {
+				BuildTraditional();
+			}
+		}
+
+		/// <summary>
+		/// Traditional mesh building (original Teddy method)
+		/// </summary>
+		void BuildTraditional () {
 			teddy = new Teddy(points);
 			var mesh = teddy.Build(MeshSmoothingMethod.HC, 2, 0.2f, 0.75f);
 			var bones = teddy.GetSkeletonBones();
 
+			CreatePuppet(mesh, bones);
+		}
+
+		/// <summary>
+		/// Build mesh using Domain Stitching Algorithm
+		/// Supports multiple body parts with proper mesh closure
+		/// </summary>
+		void BuildWithDomainStitching () {
+			// Initialize or clear the stitching system
+			stitchingSystem = new DomainStitchingSystem();
+
+			// For now, treat the drawn contour as a single part
+			// In future: support multi-part drawings (e.g., separate body and limb strokes)
+			multiPartContours.Clear();
+			multiPartContours.Add(new List<Vector2>(points));
+
+			// Determine if the contour is open or closed
+			List<bool> isOpenList = new List<bool>();
+			foreach (var contour in multiPartContours) {
+				float endDistance = Vector2.Distance(contour[0], contour[contour.Count - 1]);
+				isOpenList.Add(endDistance > 0.1f);
+			}
+
+			// Initialize stitching system with contours
+			stitchingSystem.InitializeFromContours(multiPartContours, isOpenList);
+
+			// Generate stitched mesh
+			var mesh = stitchingSystem.GenerateStitchedMesh(domainInflationAmount, smoothHeightFields);
+
+			if (mesh != null) {
+				// For domain stitching, we don't have skeleton bones yet
+				// This can be added by skeletal extraction from the generated mesh
+				CreatePuppet(mesh, new List<(Vector3, Vector3)>());
+
+				// Log statistics
+				var (vCount, tCount, dCount) = stitchingSystem.GetMeshStats();
+				Debug.Log($"[Domain Stitching] Vertices: {vCount}, Triangles: {tCount}, Domains: {dCount}");
+			}
+		}
+
+		/// <summary>
+		/// Create a puppet from mesh and bones
+		/// </summary>
+		void CreatePuppet(Mesh mesh, List<(Vector3, Vector3)> bones) {
 			var go = Instantiate(prefab);
 			go.transform.parent = transform;
 			go.transform.localPosition = Vector3.zero;
@@ -554,24 +638,46 @@ namespace mattatz.TeddySystem.Example {
 					DrawRect(new Rect(minX, minY, maxX - minX, maxY - minY), 2, Color.yellow);
 				}
 			}
-			
+
+			// ── Domain Stitching Controls ────────────────────────────────────
+			GUIStyle labelStyle = new GUIStyle(GUI.skin.label);
+			labelStyle.fontSize = 14;
+			labelStyle.normal.textColor = Color.white;
+
+			GUI.Box(new Rect(Screen.width - 210, 10, 200, isDrawingEnabled ? 140 : 115), GUIContent.none);
+			GUI.Label(new Rect(Screen.width - 200, 15, 180, 20), "─ Domain Stitching ─", labelStyle);
+
+			bool prevStitching = useDomainStitching;
+			useDomainStitching = GUI.Toggle(new Rect(Screen.width - 200, 38, 20, 20), useDomainStitching, "Enabled");
+
+			if (prevStitching != useDomainStitching) {
+				Debug.Log($"Domain Stitching: {(useDomainStitching ? "ON" : "OFF")}");
+			}
+
+			GUI.Label(new Rect(Screen.width - 200, 62, 180, 16), "Inflation: " + domainInflationAmount.ToString("F2"), labelStyle);
+			domainInflationAmount = GUI.HorizontalSlider(new Rect(Screen.width - 200, 82, 180, 18), domainInflationAmount, 0.1f, 2f);
+
+			GUI.enabled = useDomainStitching;
+			smoothHeightFields = GUI.Toggle(new Rect(Screen.width - 200, 105, 20, 20), smoothHeightFields, "Smooth");
+			GUI.enabled = true;
+
 			// ── Normal play mode right panel ────────────────────────────────────
 			if (!isEditMode && !isRigEditMode && !isAnimationMode) {
-				if (GUI.Button(new Rect(Screen.width - 210, 10, 200, 50), "Edit Mode", style)) {
+				if (GUI.Button(new Rect(Screen.width - 210, 160, 200, 50), "Edit Mode", style)) {
 					isEditMode = true;
 					if (activePuppet != null) activePuppet.StartEditMode();
 				}
 
 				// Lasso Joints button (only in normal play mode, not Edit Mode)
 				GUI.enabled = (puppets.Count > 0);
-				if (GUI.Button(new Rect(Screen.width - 210, 65, 200, 45), isLassoMode ? "▶ Drawing Lasso..." : "Lasso Joints", style)) {
+				if (GUI.Button(new Rect(Screen.width - 210, 215, 200, 45), isLassoMode ? "▶ Drawing Lasso..." : "Lasso Joints", style)) {
 					if (!isLassoMode) {
 						isLassoMode = true;
 						lassoPoints.Clear();
 						mode = OperationMode.LassoJoint;
 					}
 				}
-				if (GUI.Button(new Rect(Screen.width - 210, 115, 200, 45), "Reset Joints", style)) {
+				if (GUI.Button(new Rect(Screen.width - 210, 265, 200, 45), "Reset Joints", style)) {
 					foreach (var p in puppets) {
 						if (p != null) p.ResetLasso();
 					}
@@ -586,7 +692,7 @@ namespace mattatz.TeddySystem.Example {
 
 				// ── Edit Rig button ─────────────────────────────────────────────
 				GUI.enabled = (activePuppet != null);
-				if (GUI.Button(new Rect(Screen.width - 210, 165, 200, 45), "Edit Rig", style)) {
+				if (GUI.Button(new Rect(Screen.width - 210, 315, 200, 45), "Edit Rig", style)) {
 					isRigEditMode    = true;
 					rigEditPuppet    = activePuppet;
 					rigSelectedJoint = -1;
@@ -594,7 +700,7 @@ namespace mattatz.TeddySystem.Example {
 					rigConnectFirst  = -1;
 				}
 				
-				if (GUI.Button(new Rect(Screen.width - 210, 215, 200, 45), "Anim Mode", style)) {
+				if (GUI.Button(new Rect(Screen.width - 210, 365, 200, 45), "Anim Mode", style)) {
 					isAnimationMode = true;
 				}
 				GUI.enabled = true;
@@ -602,7 +708,7 @@ namespace mattatz.TeddySystem.Example {
 				// ── Region Physics panel ────────────────────────────────────────
 				if (showRegionPanel && regionPuppet != null && selectedRegion >= 0) {
 					float px = Screen.width - 210;
-					float py = 168f;
+					float py = 318f;
 					Rect panelRect = new Rect(px - 5, py - 4, 213, 120);
 
 					// Close when clicking OUTSIDE the panel
@@ -786,11 +892,11 @@ namespace mattatz.TeddySystem.Example {
 				GUI.DrawTexture(new Rect(Screen.width - 210, 340, 200, 40), Texture2D.whiteTexture);
 				GUI.color = prevColor;
 
-				GUIStyle labelStyle = new GUIStyle(GUI.skin.label);
-				labelStyle.alignment = TextAnchor.MiddleCenter;
-				Color textColor = (selectedEditColor.r * 0.299f + selectedEditColor.g * 0.587f + selectedEditColor.b * 0.114f) > 0.5f ? Color.black : Color.white;
-				labelStyle.normal.textColor = textColor;
-				GUI.Label(new Rect(Screen.width - 210, 340, 200, 40), "#" + ColorUtility.ToHtmlStringRGB(selectedEditColor), labelStyle);
+			GUIStyle colorLabelStyle = new GUIStyle(GUI.skin.label);
+			colorLabelStyle.alignment = TextAnchor.MiddleCenter;
+			Color textColor = (selectedEditColor.r * 0.299f + selectedEditColor.g * 0.587f + selectedEditColor.b * 0.114f) > 0.5f ? Color.black : Color.white;
+			colorLabelStyle.normal.textColor = textColor;
+			GUI.Label(new Rect(Screen.width - 210, 340, 200, 40), "#" + ColorUtility.ToHtmlStringRGB(selectedEditColor), colorLabelStyle);
 			}
 			GUI.enabled = true;
 
@@ -853,6 +959,29 @@ namespace mattatz.TeddySystem.Example {
 				}
 			}
 #endif
+
+			// ── Waiting for Inflation UI ───────────────────────────────────────
+			if (mode == OperationMode.WaitingForInflation) {
+				float bw = 240f;
+				float bh = 70f;
+				float bx = (Screen.width - bw) / 2f;
+				float by = Screen.height - 180f;
+
+				GUIStyle inflateStyle = new GUIStyle(style);
+				inflateStyle.fontSize = 26;
+				inflateStyle.fontStyle = FontStyle.Bold;
+				inflateStyle.normal.textColor = new Color(0.2f, 1f, 0.2f); // Bright green
+
+				if (GUI.Button(new Rect(bx, by, bw, bh), "INFLATE", inflateStyle)) {
+					Build();
+					mode = OperationMode.Default;
+				}
+
+				if (GUI.Button(new Rect(bx, by + bh + 15, bw, bh * 0.7f), "Cancel Sketch", style)) {
+					Clear();
+					mode = OperationMode.Default;
+				}
+			}
 		}
 
 		void DrawRect(Rect rect, int thickness, Color color) {
