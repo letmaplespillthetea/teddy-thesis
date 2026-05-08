@@ -500,6 +500,7 @@ namespace mattatz.TeddySystem.Example {
 		/// Supports multiple body parts with proper mesh closure
 		/// </summary>
 		void BuildWithDomainStitching () {
+			Debug.Log("[Drawer] Starting build with Domain Stitching...");
 			stitchingSystem = new DomainStitchingSystem();
 
 			var contoursToBuild = new List<List<Vector2>>();
@@ -518,9 +519,9 @@ namespace mattatz.TeddySystem.Example {
 			var mesh = stitchingSystem.GenerateStitchedMesh(inflationAmount, smoothHeightFields);
 
 			if (mesh != null) {
-				// For domain stitching, we don't have skeleton bones yet
-				// This can be added by skeletal extraction from the generated mesh
-				CreatePuppet(mesh, new List<(Vector3, Vector3)>());
+				// For domain stitching, we now extract the skeleton from each part's chordal axis
+				var bones = stitchingSystem.GetSkeletonBones();
+				CreatePuppet(mesh, bones);
 
 				// Log statistics
 				var (vCount, tCount, dCount) = stitchingSystem.GetMeshStats();

@@ -1,6 +1,7 @@
 using UnityEngine;
 using System.Collections.Generic;
 using System.Linq;
+using mattatz.Triangulation2DSystem;
 
 namespace mattatz.TeddySystem {
 
@@ -35,6 +36,7 @@ namespace mattatz.TeddySystem {
         /// Initialize domain stitching from user-drawn contours
         /// </summary>
         public void InitializeFromContours(List<List<Vector2>> contours, List<bool> isOpenList = null) {
+            Debug.Log($"[DomainStitching] Initializing with {contours?.Count ?? 0} contours...");
             bodyParts.Clear();
             stitchedVertices.Clear();
             stitchedTriangles.Clear();
@@ -115,17 +117,33 @@ namespace mattatz.TeddySystem {
         public Mesh GenerateStitchedMesh(float inflationAmount = 1.0f, bool smoothHeightFields = true) {
             if (bodyParts.Count == 0) return null;
 
+            Debug.Log($"[DomainStitching] Generating stitched mesh for {bodyParts.Count} body parts...");
+
             // Step 1: Generate Delaunay triangulations for each domain
+            Debug.Log($"[DomainStitching] Step 1: Triangulating {bodyParts.Count} domains...");
             foreach (var part in bodyParts) {
                 TriangulateDomain(part.frontFacing, inflationAmount);
                 TriangulateDomain(part.backFacing, -inflationAmount);
+                
+                int fv = part.frontFacing.vertices?.Count ?? 0;
+                int ft = part.frontFacing.triangles?.Count ?? 0;
+                Debug.Log($"[DomainStitching] Part {part.partID} - Front: {fv} verts, {ft/3} tris | Back: {part.backFacing.vertices?.Count ?? 0} verts");
             }
 
-            // Step 2: Merge domains with stitching
+            // Step 2: Merge domains into a single mesh
+            Debug.Log("[DomainStitching] Step 2: Merging domains...");
             var domainMerger = new DomainMerger();
             (stitchedVertices, stitchedTriangles) = domainMerger.MergeDomains(bodyParts);
+            
+            Debug.Log($"[DomainStitching] Merged mesh: {stitchedVertices.Count} vertices, {stitchedTriangles.Count / 3} triangles.");
+
+            if (stitchedVertices.Count == 0 || stitchedTriangles.Count == 0) {
+                Debug.LogError("[DomainStitching] Merged mesh is empty. Triangulation or merging failed.");
+                return null;
+            }
 
             // Step 3: Compute height fields via Poisson equation
+            Debug.Log("[DomainStitching] Step 3: Solving Poisson height fields...");
             var heightSolver = new PoissonHeightFieldSolver();
             List<float> heightFields = heightSolver.SolveHeightFields(
                 stitchedVertices.Cast<Vector3>().ToList(),
@@ -135,6 +153,7 @@ namespace mattatz.TeddySystem {
             );
 
             // Step 4: Inflate to 3D mesh
+            Debug.Log("[DomainStitching] Step 4: Inflating to 3D and finalizing mesh...");
             var inflater = new MeshInflationUtility();
             Mesh finalMesh = inflater.InflateTo3D(
                 stitchedVertices.Cast<Vector3>().ToList(),
@@ -143,26 +162,75 @@ namespace mattatz.TeddySystem {
                 smoothHeightFields
             );
 
+            if (finalMesh != null) {
+                Vector3 centroid = Vector3.zero;
+                Vector3[] verts = finalMesh.vertices;
+                foreach (var v in verts) centroid += v;
+                if (verts.Length > 0) centroid /= verts.Length;
+
+                Debug.Log($"[DomainStitching] Mesh generation complete. " +
+                          $"Vertices: {finalMesh.vertexCount}, " +
+                          $"Triangles: {finalMesh.triangles.Length / 3}, " +
+                          $"Centroid: {centroid.ToString("F3")}");
+            } else {
+                Debug.LogError("[DomainStitching] Mesh generation failed.");
+            }
+
             return finalMesh;
         }
 
         /// <summary>
-        /// Triangulate a single domain using constrained Delaunay triangulation
+        /// Triangulate a single domain using the robust Triangulation2D system
         /// </summary>
         private void TriangulateDomain(StitchedDomain domain, float inflationSign) {
-            var triangulator = new ConstrainedDelaunayTriangulation();
-
-            // Combine boundary curves
-            var boundaryVertices = new List<Vector2>(domain.boundary);
-            if (domain.closureCurve != null) {
-                boundaryVertices.AddRange(domain.closureCurve);
+            // Combine boundary and closure curve to form a closed loop
+            var points = new List<Vector2>(domain.boundary);
+            if (domain.closureCurve != null && domain.closureCurve.Count > 0) {
+                points.AddRange(domain.closureCurve);
             }
 
-            // Constrain triangulation by the boundary
-            triangulator.SetBoundaryConstraint(boundaryVertices);
+            // --- Clean points to prevent triangulation failures ---
+            var cleanPoints = new List<Vector2>();
+            if (points.Count > 0) {
+                cleanPoints.Add(points[0]);
+                for (int i = 1; i < points.Count; i++) {
+                    if (Vector2.Distance(points[i], points[i - 1]) > 0.001f) {
+                        cleanPoints.Add(points[i]);
+                    }
+                }
+            }
+            // Ensure loop is closed but without duplicate start/end for the triangulator
+            if (cleanPoints.Count > 2 && Vector2.Distance(cleanPoints[0], cleanPoints.Last()) < 0.001f) {
+                cleanPoints.RemoveAt(cleanPoints.Count - 1);
+            }
 
-            // Generate triangulation
-            (domain.vertices, domain.triangles) = triangulator.Triangulate();
+            if (cleanPoints.Count < 3) {
+                Debug.LogWarning($"[DomainStitching] Domain {domain.domainID} has insufficient points ({cleanPoints.Count}).");
+                domain.vertices = new List<Vector2>();
+                domain.triangles = new List<int>();
+                return;
+            }
+
+            try {
+                // Use the reliable Triangulation2D from the package
+                var polygon = Polygon2D.Contour(cleanPoints.ToArray());
+                var triangulation = new Triangulation2D(polygon, 0f);
+
+                // Map results back to domain
+                domain.vertices = triangulation.Points.Select(v => v.Coordinate).ToList();
+                domain.triangles = new List<int>();
+                
+                var pointsList = triangulation.Points.ToList();
+                foreach (var t in triangulation.Triangles) {
+                    domain.triangles.Add(pointsList.IndexOf(t.a));
+                    domain.triangles.Add(pointsList.IndexOf(t.b));
+                    domain.triangles.Add(pointsList.IndexOf(t.c));
+                }
+            } catch (System.Exception e) {
+                Debug.LogError($"[DomainStitching] Triangulation failed for domain {domain.domainID}: {e.Message}");
+                domain.vertices = new List<Vector2>();
+                domain.triangles = new List<int>();
+            }
 
             // Store inflation amount
             domain.inflationAmount = inflationSign;
@@ -222,6 +290,113 @@ namespace mattatz.TeddySystem {
                 stitchedTriangles.Count / 3,
                 bodyParts.Count
             );
+        }
+
+        /// <summary>
+        /// Extracts skeleton bones for the stitched puppet.
+        /// Iterates through each body part and uses the Teddy algorithm to find the chordal axis.
+        /// Connects bones between parts to form a cohesive skeleton.
+        /// </summary>
+        public List<(Vector3, Vector3)> GetSkeletonBones() {
+            var allBones = new List<(Vector3, Vector3)>();
+            var partSkeletons = new List<List<(Vector3, Vector3)>>();
+            
+            if (bodyParts == null || bodyParts.Count == 0) {
+                Debug.LogWarning("[DomainStitching] No body parts available for skeleton extraction.");
+                return allBones;
+            }
+
+            Debug.Log($"[DomainStitching] Extracting skeletons for {bodyParts.Count} body parts...");
+
+            // 1. Extract skeleton for each part independently
+            foreach (var part in bodyParts) {
+                var rawPoints = new List<Vector2>(part.frontFacing.boundary);
+                if (part.frontFacing.closureCurve != null && part.frontFacing.closureCurve.Count > 0) {
+                    rawPoints.AddRange(part.frontFacing.closureCurve);
+                }
+
+                // Cleanup points (duplicates crash triangulation)
+                var cleanPoints = CleanContour(rawPoints);
+                if (cleanPoints.Count < 3) continue;
+
+                var bones = new List<(Vector3, Vector3)>();
+                try {
+                    Teddy t = new Teddy(cleanPoints);
+                    var extracted = t.GetSkeletonBones();
+                    if (extracted != null && extracted.Count > 0) {
+                        bones.AddRange(extracted);
+                    } else {
+                        AddFallbackBone(cleanPoints, bones);
+                    }
+                } catch {
+                    AddFallbackBone(cleanPoints, bones);
+                }
+                partSkeletons.Add(bones);
+            }
+
+            // 2. Connect skeletons between parts
+            // We assume the first part is the main body. Other parts connect to the nearest joint in the accumulated skeleton.
+            if (partSkeletons.Count > 0) {
+                allBones.AddRange(partSkeletons[0]);
+
+                for (int i = 1; i < partSkeletons.Count; i++) {
+                    var currentPartBones = partSkeletons[i];
+                    if (currentPartBones.Count == 0) continue;
+
+                    // Find attachment point (midpoint of the closure curve for this part)
+                    var part = bodyParts[i];
+                    if (part.frontFacing.closureCurve != null && part.frontFacing.closureCurve.Count > 0) {
+                        Vector2 attachment2D = Vector2.zero;
+                        foreach (var p in part.frontFacing.closureCurve) attachment2D += p;
+                        attachment2D /= part.frontFacing.closureCurve.Count;
+                        Vector3 attachment3D = new Vector3(attachment2D.x, attachment2D.y, 0.001f);
+
+                        // Find closest joint in existing skeleton
+                        Vector3 closestJointInAll = FindClosestJoint(attachment3D, allBones);
+                        // Find closest joint in current part's skeleton
+                        Vector3 closestJointInCurrent = FindClosestJoint(attachment3D, currentPartBones);
+
+                        // Add connecting bone
+                        allBones.Add((closestJointInAll, closestJointInCurrent));
+                    }
+
+                    allBones.AddRange(currentPartBones);
+                }
+            }
+
+            Debug.Log($"[DomainStitching] Final skeleton has {allBones.Count} bones.");
+            return allBones;
+        }
+
+        private List<Vector2> CleanContour(List<Vector2> points) {
+            var result = new List<Vector2>();
+            if (points.Count == 0) return result;
+            result.Add(points[0]);
+            for (int i = 1; i < points.Count; i++) {
+                if (Vector2.Distance(points[i], points[i - 1]) > 0.001f) result.Add(points[i]);
+            }
+            if (result.Count > 1 && Vector2.Distance(result[0], result.Last()) < 0.001f) result.RemoveAt(result.Count - 1);
+            return result;
+        }
+
+        private Vector3 FindClosestJoint(Vector3 target, List<(Vector3, Vector3)> bones) {
+            Vector3 closest = target;
+            float minDist = float.MaxValue;
+            foreach (var b in bones) {
+                float d0 = Vector3.Distance(target, b.Item1);
+                if (d0 < minDist) { minDist = d0; closest = b.Item1; }
+                float d1 = Vector3.Distance(target, b.Item2);
+                if (d1 < minDist) { minDist = d1; closest = b.Item2; }
+            }
+            return closest;
+        }
+
+        private void AddFallbackBone(List<Vector2> points, List<(Vector3, Vector3)> boneList) {
+            if (points.Count == 0) return;
+            Vector2 centroid = Vector2.zero;
+            foreach (var p in points) centroid += p;
+            centroid /= points.Count;
+            boneList.Add((new Vector3(centroid.x, centroid.y, 0.001f), new Vector3(points[0].x, points[0].y, 0.001f)));
         }
     }
 

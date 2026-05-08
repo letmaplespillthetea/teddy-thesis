@@ -32,15 +32,21 @@ namespace mattatz.TeddySystem {
                 return heightFields;
             }
 
+            Debug.Log($"[PoissonSolver] Solving height fields for {vertices.Count} vertices...");
+
             // Build Laplacian matrix
+            Debug.Log("[PoissonSolver] Building Laplacian system...");
             var (laplacianMatrix, rhs) = BuildLaplacianSystem(vertices, triangles, bodyParts, inflationAmount);
 
             // Solve using iterative method (Jacobi or GMRES)
+            Debug.Log("[PoissonSolver] Starting iterative linear solver...");
             heightFields = SolveLinearSystem(laplacianMatrix, rhs, vertices.Count);
 
             // Apply semi-elliptical transformation
+            Debug.Log("[PoissonSolver] Applying semi-elliptical shaping...");
             ApplySemiEllipticalShaping(heightFields);
 
+            Debug.Log("[PoissonSolver] Height field calculation complete.");
             return heightFields;
         }
 
@@ -265,7 +271,10 @@ namespace mattatz.TeddySystem {
             var x_new = new float[size];
 
             // Jacobi iteration
+            int finalIter = 0;
+            float finalResidual = 0f;
             for (int iter = 0; iter < maxIterations; iter++) {
+                finalIter = iter;
                 for (int i = 0; i < size; i++) {
                     float sum = 0f;
 
@@ -287,6 +296,7 @@ namespace mattatz.TeddySystem {
                 for (int i = 0; i < size; i++) {
                     residual += Mathf.Abs(x_new[i] - x[i]);
                 }
+                finalResidual = residual;
 
                 System.Array.Copy(x_new, x, size);
 
@@ -294,6 +304,8 @@ namespace mattatz.TeddySystem {
                     break;
                 }
             }
+
+            Debug.Log($"[PoissonSolver] Linear solver converged in {finalIter + 1} iterations. Final residual: {finalResidual:F6}");
 
             return x.ToList();
         }

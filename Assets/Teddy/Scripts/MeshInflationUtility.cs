@@ -27,9 +27,12 @@ namespace mattatz.TeddySystem {
                 return null;
             }
 
+            Debug.Log($"[MeshInflation] Inflating {plannarVertices.Count} vertices to 3D...");
+
             var mesh = new Mesh();
 
             // Step 1: Create 3D vertices from height fields
+            Debug.Log("[MeshInflation] Step 1: Creating 3D vertices...");
             var inflatedVertices = new List<Vector3>();
             var vertexMap = new Dictionary<int, int>();  // Maps 2D vertex index to 3D vertex index
 
@@ -46,13 +49,9 @@ namespace mattatz.TeddySystem {
             }
 
             // Step 2: Create triangles with correct winding
+            Debug.Log("[MeshInflation] Step 2: Reconstructing triangles with proper winding...");
             var inflatedTriangles = new List<int>();
-            var normals = new List<Vector3>();
-
-            for (int i = 0; i < plannarVertices.Count; i++) {
-                normals.Add(Vector3.zero);
-            }
-
+            
             // Add original triangles
             for (int t = 0; t < triangles.Count; t += 3) {
                 int i0 = vertexMap[triangles[t]];
@@ -81,10 +80,11 @@ namespace mattatz.TeddySystem {
             }
 
             // Step 3: Create caps and close the mesh
-            // For open boundaries, create connecting surfaces
+            Debug.Log("[MeshInflation] Step 3: Closing open boundaries...");
             CloseOpenBoundaries(inflatedVertices, inflatedTriangles, plannarVertices, triangles, heightFields);
 
             // Step 4: Calculate normals
+            Debug.Log("[MeshInflation] Step 4: Finalizing mesh and recalculating normals...");
             mesh.vertices = inflatedVertices.ToArray();
             mesh.triangles = inflatedTriangles.ToArray();
             mesh.RecalculateNormals();
@@ -92,9 +92,11 @@ namespace mattatz.TeddySystem {
 
             // Step 5: Optional smoothing
             if (smoothHeightFields && inflatedVertices.Count < 65000) {
+                Debug.Log("[MeshInflation] Step 5: Applying Laplacian smoothing...");
                 SmoothMesh(mesh, smoothingIterations, smoothingStrength);
             }
 
+            Debug.Log("[MeshInflation] Inflation complete.");
             return mesh;
         }
 

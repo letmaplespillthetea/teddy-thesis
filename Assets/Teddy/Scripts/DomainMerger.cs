@@ -36,22 +36,28 @@ namespace mattatz.TeddySystem {
                 return (mergedVertices, mergedTriangles);
             }
 
+            Debug.Log($"[DomainMerger] Merging {bodyParts.Count} body parts...");
+
             // Step 1: Merge all front-facing domains
+            Debug.Log("[DomainMerger] Step 1: Merging front-facing domains...");
             foreach (var part in bodyParts) {
                 MergeDomain(part.frontFacing, part.frontFacing.domainID);
             }
 
             // Step 2: Merge all back-facing domains
+            Debug.Log("[DomainMerger] Step 2: Merging back-facing domains...");
             foreach (var part in bodyParts) {
                 MergeDomain(part.backFacing, part.backFacing.domainID);
             }
 
             // Step 3: Stitch front and back domains of each part
+            Debug.Log("[DomainMerger] Step 3: Stitching front and back domains...");
             foreach (var part in bodyParts) {
                 StitchFrontAndBack(part);
             }
 
             // Step 4: Handle open boundaries - create holes and attach parts
+            Debug.Log("[DomainMerger] Step 4: Handling open boundaries and attachments...");
             foreach (var part in bodyParts) {
                 if (part.frontFacing.isOpenContour && part.backFacing.isOpenContour) {
                     AttachOpenBoundaries(part);
@@ -59,8 +65,10 @@ namespace mattatz.TeddySystem {
             }
 
             // Step 5: Merge all vertices to final mesh
+            Debug.Log("[DomainMerger] Step 5: Finalizing vertices...");
             FinalizeVertices();
 
+            Debug.Log($"[DomainMerger] Merge complete. Merged vertices: {mergedVertices.Count}, triangles: {mergedTriangles.Count / 3}");
             return (mergedVertices, mergedTriangles);
         }
 
@@ -73,11 +81,12 @@ namespace mattatz.TeddySystem {
             int vertexOffset = mergedVertices.Count;
 
             // Add vertices
-            foreach (var v in domain.vertices) {
+            for (int i = 0; i < domain.vertices.Count; i++) {
+                Vector2 v = domain.vertices[i];
                 mergedVertices.Add(new Vector3(v.x, v.y, 0f));
                 vertexMap.Add(new VertexMapping {
                     position = v,
-                    originalIndex = mergedVertices.Count - 1,
+                    originalIndex = i,
                     domainID = domainID,
                     isBoundary = IsBoundaryVertex(v, domain),
                     globalIndex = mergedVertices.Count - 1
