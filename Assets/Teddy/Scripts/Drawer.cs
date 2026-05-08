@@ -44,10 +44,11 @@ namespace mattatz.TeddySystem.Example {
 		[SerializeField, Range(0f, 1f)] float shapeStiffness = 0.2f;
 		[SerializeField, Range(0f, 1f)] float damping = 0.1f;
 
+		[SerializeField, Range(0.1f, 2f)] float inflationAmount = 1.0f;
+		[SerializeField] bool smoothHeightFields = true;
+
 		[Header("Domain Stitching (Advanced)")]
 		[SerializeField] bool useDomainStitching = false;
-		[SerializeField, Range(0.1f, 2f)] float domainInflationAmount = 1.0f;
-		[SerializeField] bool smoothHeightFields = true;
 
 		OperationMode mode;
 
@@ -488,7 +489,7 @@ namespace mattatz.TeddySystem.Example {
 			if (points.Count < 3) return;
 
 			teddy = new Teddy(points);
-			var mesh = teddy.Build(smoothHeightFields ? MeshSmoothingMethod.HC : MeshSmoothingMethod.None, 2, 0.2f, 0.75f);
+			var mesh = teddy.Build(smoothHeightFields ? MeshSmoothingMethod.HC : MeshSmoothingMethod.None, 2, 0.2f, 0.75f, inflationAmount);
 			var bones = teddy.GetSkeletonBones();
 
 			CreatePuppet(mesh, bones);
@@ -514,7 +515,7 @@ namespace mattatz.TeddySystem.Example {
 			}
 
 			stitchingSystem.InitializeFromContours(contoursToBuild, isOpenList);
-			var mesh = stitchingSystem.GenerateStitchedMesh(domainInflationAmount, smoothHeightFields);
+			var mesh = stitchingSystem.GenerateStitchedMesh(inflationAmount, smoothHeightFields);
 
 			if (mesh != null) {
 				// For domain stitching, we don't have skeleton bones yet
@@ -674,20 +675,23 @@ namespace mattatz.TeddySystem.Example {
 			labelStyle.fontSize = 14;
 			labelStyle.normal.textColor = Color.white;
 
-			GUI.Box(new Rect(Screen.width - 210, 10, 200, isDrawingEnabled ? 140 : 115), GUIContent.none);
+			GUI.Box(new Rect(Screen.width - 210, 10, 200, 140), GUIContent.none);
 			GUI.Label(new Rect(Screen.width - 200, 15, 180, 20), "─ Mesh Generation ─", labelStyle);
 
+			// Inflation - applies to both modes
+			GUI.Label(new Rect(Screen.width - 200, 38, 180, 16), "Inflation: " + inflationAmount.ToString("F2"), labelStyle);
+			inflationAmount = GUI.HorizontalSlider(new Rect(Screen.width - 200, 58, 180, 18), inflationAmount, 0.1f, 2f);
+
+			// Smoothing - applies to both modes
+			smoothHeightFields = GUI.Toggle(new Rect(Screen.width - 200, 80, 180, 20), smoothHeightFields, " Smooth Mesh");
+
+			// Domain Stitching mode toggle
 			bool prevStitching = useDomainStitching;
-			useDomainStitching = GUI.Toggle(new Rect(Screen.width - 200, 38, 20, 20), useDomainStitching, "Enabled");
+			useDomainStitching = GUI.Toggle(new Rect(Screen.width - 200, 105, 180, 20), useDomainStitching, " Domain Stitching");
 
 			if (prevStitching != useDomainStitching) {
 				Debug.Log($"Domain Stitching: {(useDomainStitching ? "ON" : "OFF")}");
 			}
-
-			GUI.Label(new Rect(Screen.width - 200, 62, 180, 16), "Inflation: " + domainInflationAmount.ToString("F2"), labelStyle);
-			domainInflationAmount = GUI.HorizontalSlider(new Rect(Screen.width - 200, 82, 180, 18), domainInflationAmount, 0.1f, 2f);
-
-			smoothHeightFields = GUI.Toggle(new Rect(Screen.width - 200, 105, 20, 20), smoothHeightFields, "Smooth");
 
 			// ── Normal play mode right panel ────────────────────────────────────
 			if (!isEditMode && !isRigEditMode && !isAnimationMode) {

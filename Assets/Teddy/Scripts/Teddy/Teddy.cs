@@ -68,12 +68,12 @@ namespace mattatz.TeddySystem {
             Sew(triangulation, chord, heightTable, 3);
         }
 
-        public Mesh Build(MeshSmoothingMethod method, int times = 5, float alpha = 0.2f, float beta = 0.5f) {
+        public Mesh Build(MeshSmoothingMethod method, int times = 5, float alpha = 0.2f, float beta = 0.5f, float inflation = 1.0f) {
             var mesh = triangulation.Build(
                 (Vertex2D v) => {
                     float z = 0f;
                     if (heightTable.ContainsKey(v)) {
-                        z = heightTable[v];
+                        z = heightTable[v] * inflation;
                     }
                     return new Vector3(v.Coordinate.x, v.Coordinate.y, -z);
                 }
