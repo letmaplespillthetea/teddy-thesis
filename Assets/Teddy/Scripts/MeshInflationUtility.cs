@@ -21,6 +21,7 @@ namespace mattatz.TeddySystem {
             List<Vector3> plannarVertices,
             List<int> triangles,
             List<float> heightFields,
+            Vector3 cameraLocalPos,
             bool smoothHeightFields = true) {
 
             if (plannarVertices.Count == 0 || triangles.Count == 0) {
@@ -48,35 +49,102 @@ namespace mattatz.TeddySystem {
                 vertexMap[i] = idx3D;
             }
 
-            // Step 2: Create triangles with correct winding
-            Debug.Log("[MeshInflation] Step 2: Reconstructing triangles with proper winding...");
+            // Step 2: Symmetrize mesh (create front and back faces)
+            Debug.Log("[MeshInflation] Step 2: Symmetrizing mesh (creating front and back faces)...");
             var inflatedTriangles = new List<int>();
             
-            // Add original triangles
+            const float epsilon = 0.01f; // Increased epsilon for more robust contour detection
+            int originalVertexCount = inflatedVertices.Count;
+            
+            Debug.Log($"[MeshInflation] Original vertex count: {originalVertexCount}");
+            
+            // Add front-facing triangles
             for (int t = 0; t < triangles.Count; t += 3) {
                 int i0 = vertexMap[triangles[t]];
                 int i1 = vertexMap[triangles[t + 1]];
                 int i2 = vertexMap[triangles[t + 2]];
 
-                // Check winding and add triangle
-                Vector3 v0 = inflatedVertices[i0];
-                Vector3 v1 = inflatedVertices[i1];
-                Vector3 v2 = inflatedVertices[i2];
-
-                Vector3 normal = Vector3.Cross(v1 - v0, v2 - v0);
-
-                // Ensure correct winding (outward facing)
-                Vector3 centroid = (v0 + v1 + v2) / 3f;
-                if (Vector3.Dot(normal, centroid) < 0) {
-                    // Flip winding
-                    int temp = i1;
-                    i1 = i2;
-                    i2 = temp;
-                }
-
                 inflatedTriangles.Add(i0);
                 inflatedTriangles.Add(i1);
                 inflatedTriangles.Add(i2);
+            }
+            
+            // Build mirror map: original index -> mirrored index
+            var mirrorMap = new Dictionary<int, int>();
+            int contourVertexCount = 0;
+            for (int i = 0; i < originalVertexCount; i++) {
+                Vector3 v = inflatedVertices[i];
+                if (Mathf.Abs(v.z) > epsilon) {
+                    // Create mirrored vertex and store mapping
+                    int mirroredIdx = inflatedVertices.Count;
+                    inflatedVertices.Add(new Vector3(v.x, v.y, -v.z));
+                    mirrorMap[i] = mirroredIdx;
+                } else {
+                    contourVertexCount++;
+                }
+            }
+            
+            Debug.Log($"[MeshInflation] Contour vertices: {contourVertexCount}, Mirrored vertices: {mirrorMap.Count}");
+            Debug.Log($"[MeshInflation] Total vertices after mirroring: {inflatedVertices.Count}");
+            
+            // Add back-facing triangles (reversed winding)
+            int skippedTriangles = 0;
+            for (int t = 0; t < triangles.Count; t += 3) {
+                int i0 = vertexMap[triangles[t]];
+                int i1 = vertexMap[triangles[t + 1]];
+                int i2 = vertexMap[triangles[t + 2]];
+                
+                Vector3 v0 = inflatedVertices[i0];
+                Vector3 v1 = inflatedVertices[i1];
+                Vector3 v2 = inflatedVertices[i2];
+                
+                // Map to mirrored vertices or keep contour vertices
+                int ni0, ni1, ni2;
+                
+                if (Mathf.Abs(v0.z) <= epsilon) {
+                    ni0 = i0;
+                } else if (mirrorMap.ContainsKey(i0)) {
+                    ni0 = mirrorMap[i0];
+                } else {
+                    // Create mirrored vertex on-the-fly if missing
+                    int mirroredIdx = inflatedVertices.Count;
+                    inflatedVertices.Add(new Vector3(v0.x, v0.y, -v0.z));
+                    mirrorMap[i0] = mirroredIdx;
+                    ni0 = mirroredIdx;
+                }
+                
+                if (Mathf.Abs(v1.z) <= epsilon) {
+                    ni1 = i1;
+                } else if (mirrorMap.ContainsKey(i1)) {
+                    ni1 = mirrorMap[i1];
+                } else {
+                    // Create mirrored vertex on-the-fly if missing
+                    int mirroredIdx = inflatedVertices.Count;
+                    inflatedVertices.Add(new Vector3(v1.x, v1.y, -v1.z));
+                    mirrorMap[i1] = mirroredIdx;
+                    ni1 = mirroredIdx;
+                }
+                
+                if (Mathf.Abs(v2.z) <= epsilon) {
+                    ni2 = i2;
+                } else if (mirrorMap.ContainsKey(i2)) {
+                    ni2 = mirrorMap[i2];
+                } else {
+                    // Create mirrored vertex on-the-fly if missing
+                    int mirroredIdx = inflatedVertices.Count;
+                    inflatedVertices.Add(new Vector3(v2.x, v2.y, -v2.z));
+                    mirrorMap[i2] = mirroredIdx;
+                    ni2 = mirroredIdx;
+                }
+                
+                // Reverse winding for back face
+                inflatedTriangles.Add(ni0);
+                inflatedTriangles.Add(ni2);
+                inflatedTriangles.Add(ni1);
+            }
+            
+            if (skippedTriangles > 0) {
+                Debug.LogWarning($"[MeshInflation] Skipped {skippedTriangles} back-facing triangles due to missing mirror mapping.");
             }
 
             // Step 3: Create caps and close the mesh
@@ -194,7 +262,8 @@ namespace mattatz.TeddySystem {
 
         /// <summary>
         /// Apply as-rigid-as-possible (ARAP) deformation constraints
-        /// Used to move deformed parts while maintaining mesh rigidity
+        /// Implements simplified ARAP-L from "Teddy: A Sketching Interface for 3D Freeform Design"
+        /// Uses local-global optimization with layering constraints
         /// </summary>
         public void ApplyARAPDeformation(
             ref Mesh mesh,
@@ -206,25 +275,145 @@ namespace mattatz.TeddySystem {
             }
 
             Vector3[] vertices = mesh.vertices;
+            Vector3[] originalVertices = (Vector3[])vertices.Clone();
             int[] triangles = mesh.triangles;
 
-            // For each constraint
-            foreach (var constraint in constraints) {
-                if (constraint.type == ConstraintType.Inequality) {
-                    // Move vertices to target Z position
-                    foreach (int vIdx in constraint.affectedVertices) {
-                        if (vIdx >= 0 && vIdx < vertices.Length) {
-                            vertices[vIdx].z = Mathf.Max(vertices[vIdx].z, constraint.targetZ);
+            Debug.Log($"[ARAP] Starting ARAP-L deformation with {constraints.Count} constraints, {iterations} iterations...");
+
+            // Build adjacency list with cotangent weights
+            var neighbors = BuildAdjacencyList(vertices.Length, triangles);
+            var weights = ComputeCotangentWeights(originalVertices, triangles, neighbors);
+
+            // Local-global optimization loop
+            for (int iter = 0; iter < iterations; iter++) {
+                // GLOBAL STEP: Solve for new vertex positions with constraints
+                var newVertices = new Vector3[vertices.Length];
+                
+                for (int i = 0; i < vertices.Length; i++) {
+                    // Check if this vertex has constraints
+                    var constraintType = GetVertexConstraintType(i, constraints, out float targetZ);
+                    
+                    if (constraintType == ConstraintType.Equality) {
+                        // Equality constraint: keep at current position
+                        newVertices[i] = vertices[i];
+                    } else {
+                        // Compute ARAP energy minimization for this vertex
+                        Vector3 laplacian = ComputeWeightedLaplacian(i, vertices, neighbors, weights);
+                        Vector3 proposed = vertices[i] + laplacian * 0.5f;  // Damped update
+                        
+                        if (constraintType == ConstraintType.Inequality) {
+                            // Inequality constraint: enforce z >= targetZ
+                            proposed.z = Mathf.Max(proposed.z, targetZ);
                         }
+                        
+                        newVertices[i] = proposed;
                     }
-                } else if (constraint.type == ConstraintType.Equality) {
-                    // Keep vertices at their current positions
-                    // (used for maintaining contact with body)
+                }
+                
+                vertices = newVertices;
+            }
+
+            Debug.Log($"[ARAP] Deformation complete.");
+            mesh.vertices = vertices;
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+        }
+        
+        /// <summary>
+        /// Get constraint type for a vertex
+        /// </summary>
+        private ConstraintType GetVertexConstraintType(int vertexIndex, List<DeformationConstraint> constraints, out float targetZ) {
+            targetZ = 0f;
+            
+            foreach (var constraint in constraints) {
+                if (constraint.affectedVertices.Contains(vertexIndex)) {
+                    targetZ = constraint.targetZ;
+                    return constraint.type;
+                }
+            }
+            
+            return (ConstraintType)(-1);  // No constraint
+        }
+        
+        /// <summary>
+        /// Compute weighted Laplacian for ARAP energy
+        /// </summary>
+        private Vector3 ComputeWeightedLaplacian(int vertexIndex, Vector3[] vertices, List<int>[] neighbors, Dictionary<(int, int), float> weights) {
+            Vector3 laplacian = Vector3.zero;
+            float totalWeight = 0f;
+            
+            foreach (int neighbor in neighbors[vertexIndex]) {
+                var key = vertexIndex < neighbor ? (vertexIndex, neighbor) : (neighbor, vertexIndex);
+                float weight = weights.ContainsKey(key) ? weights[key] : 1f;
+                
+                laplacian += weight * (vertices[neighbor] - vertices[vertexIndex]);
+                totalWeight += weight;
+            }
+            
+            if (totalWeight > 0f) {
+                laplacian /= totalWeight;
+            }
+            
+            return laplacian;
+        }
+        
+        /// <summary>
+        /// Compute cotangent weights for mesh edges
+        /// Simplified version - uses uniform weights for now
+        /// </summary>
+        private Dictionary<(int, int), float> ComputeCotangentWeights(Vector3[] vertices, int[] triangles, List<int>[] neighbors) {
+            var weights = new Dictionary<(int, int), float>();
+            
+            // For simplicity, use uniform weights
+            // Full implementation would compute actual cotangent weights from triangle angles
+            for (int i = 0; i < neighbors.Length; i++) {
+                foreach (int j in neighbors[i]) {
+                    var key = i < j ? (i, j) : (j, i);
+                    if (!weights.ContainsKey(key)) {
+                        weights[key] = 1f;
+                    }
+                }
+            }
+            
+            return weights;
+        }
+
+        /// <summary>
+        /// Build adjacency list for mesh vertices
+        /// </summary>
+        private List<int>[] BuildAdjacencyList(int vertexCount, int[] triangles) {
+            var neighbors = new List<int>[vertexCount];
+            for (int i = 0; i < vertexCount; i++) {
+                neighbors[i] = new List<int>();
+            }
+
+            for (int t = 0; t < triangles.Length; t += 3) {
+                for (int i = 0; i < 3; i++) {
+                    int v1 = triangles[t + i];
+                    int v2 = triangles[t + ((i + 1) % 3)];
+
+                    if (!neighbors[v1].Contains(v2)) {
+                        neighbors[v1].Add(v2);
+                    }
+                    if (!neighbors[v2].Contains(v1)) {
+                        neighbors[v2].Add(v1);
+                    }
                 }
             }
 
-            mesh.vertices = vertices;
-            mesh.RecalculateNormals();
+            return neighbors;
+        }
+
+        /// <summary>
+        /// Check if a vertex is constrained by any constraint
+        /// </summary>
+        private bool IsConstrainedVertex(int vertexIndex, List<DeformationConstraint> constraints) {
+            foreach (var constraint in constraints) {
+                if (constraint.affectedVertices.Contains(vertexIndex)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /// <summary>

@@ -19,6 +19,7 @@ namespace mattatz.TeddySystem {
             public float inflationAmount = 1.0f;     // Inflation distance c
             public bool isOpenContour = false;       // Whether contour is open
             public int domainID;
+            public bool isAppendage = false;         // Mark as appendage (leg/arm)
         }
 
         public class BodyPartConfig {
@@ -68,14 +69,16 @@ namespace mattatz.TeddySystem {
             config.frontFacing = new StitchedDomain {
                 domainID = partID * 2,
                 boundary = new List<Vector2>(contour),
-                isOpenContour = isOpen
+                isOpenContour = isOpen,
+                isAppendage = isOpen
             };
 
             // Back-facing region (mirror)
             config.backFacing = new StitchedDomain {
                 domainID = partID * 2 + 1,
                 boundary = new List<Vector2>(contour),
-                isOpenContour = isOpen
+                isOpenContour = isOpen,
+                isAppendage = isOpen
             };
 
             // If contour is open, create a closure curve
@@ -114,7 +117,7 @@ namespace mattatz.TeddySystem {
         /// <summary>
         /// Execute full domain stitching pipeline
         /// </summary>
-        public Mesh GenerateStitchedMesh(float inflationAmount = 1.0f, bool smoothHeightFields = true) {
+        public Mesh GenerateStitchedMesh(Vector3 cameraLocalPos, float inflationAmount = 1.0f, bool smoothHeightFields = true) {
             if (bodyParts.Count == 0) return null;
 
             Debug.Log($"[DomainStitching] Generating stitched mesh for {bodyParts.Count} body parts...");
@@ -142,6 +145,52 @@ namespace mattatz.TeddySystem {
                 return null;
             }
 
+            // Log appendage triangle count
+            int appTriCount = 0;
+            if (domainMerger.triangleIsAppendage != null) {
+                appTriCount = domainMerger.triangleIsAppendage.Count(t => t);
+            }
+            Debug.Log($"[DomainStitching] Internal logic check: {appTriCount} appendage triangles found.");
+
+            // Spatial check based on sketch coordinates as requested
+            int spatialAppCount = 0;
+            var appendageContours = bodyParts
+                .Where(p => p.frontFacing.isAppendage)
+                .Select(p => p.frontFacing.boundary)
+                .ToList();
+
+            // Print 4 sample points for each appendage sketch as requested
+            foreach (var part in bodyParts) {
+                if (part.frontFacing.isAppendage) {
+                    var contour = part.frontFacing.boundary;
+                    string samplePoints = "";
+                    for (int j = 0; j < Mathf.Min(4, contour.Count); j++) {
+                        samplePoints += $"({contour[j].x:F3}, {contour[j].y:F3}) ";
+                    }
+                    Debug.Log($"[DomainStitching] Leg Sketch Sample Points (XY): {samplePoints}");
+                }
+            }
+
+            for (int i = 0; i < stitchedTriangles.Count; i += 3) {
+                Vector3 v0 = stitchedVertices[stitchedTriangles[i]];
+                Vector3 v1 = stitchedVertices[stitchedTriangles[i + 1]];
+                Vector3 v2 = stitchedVertices[stitchedTriangles[i + 2]];
+                
+                // Use centroid for spatial check
+                Vector2 triCentroid = new Vector2(
+                    (v0.x + v1.x + v2.x) / 3f,
+                    (v0.y + v1.y + v2.y) / 3f
+                );
+
+                foreach (var poly in appendageContours) {
+                    if (IsPointInPolygon(triCentroid, poly)) {
+                        spatialAppCount++;
+                        break;
+                    }
+                }
+            }
+            Debug.Log($"[DomainStitching] Spatial check: Found {spatialAppCount} triangles inside leg sketch regions.");
+
             // Step 3: Compute height fields via Poisson equation
             Debug.Log("[DomainStitching] Step 3: Solving Poisson height fields...");
             var heightSolver = new PoissonHeightFieldSolver();
@@ -152,6 +201,15 @@ namespace mattatz.TeddySystem {
                 inflationAmount
             );
 
+            if (heightFields != null && heightFields.Count > 0) {
+                float minH = heightFields.Min();
+                float maxH = heightFields.Max();
+                float avgH = heightFields.Average();
+                Debug.Log($"[DomainStitching] Poisson solver complete. Heights - Min: {minH:F4}, Max: {maxH:F4}, Avg: {avgH:F4}, Count: {heightFields.Count}");
+            } else {
+                Debug.LogWarning("[DomainStitching] Poisson solver returned no height fields.");
+            }
+
             // Step 4: Inflate to 3D mesh
             Debug.Log("[DomainStitching] Step 4: Inflating to 3D and finalizing mesh...");
             var inflater = new MeshInflationUtility();
@@ -159,22 +217,36 @@ namespace mattatz.TeddySystem {
                 stitchedVertices.Cast<Vector3>().ToList(),
                 stitchedTriangles,
                 heightFields,
+                cameraLocalPos,
                 smoothHeightFields
             );
 
-            if (finalMesh != null) {
-                Vector3 centroid = Vector3.zero;
-                Vector3[] verts = finalMesh.vertices;
-                foreach (var v in verts) centroid += v;
-                if (verts.Length > 0) centroid /= verts.Length;
-
-                Debug.Log($"[DomainStitching] Mesh generation complete. " +
-                          $"Vertices: {finalMesh.vertexCount}, " +
-                          $"Triangles: {finalMesh.triangles.Length / 3}, " +
-                          $"Centroid: {centroid.ToString("F3")}");
-            } else {
+            if (finalMesh == null) {
                 Debug.LogError("[DomainStitching] Mesh generation failed.");
+                return null;
             }
+
+            // Step 5: Apply ARAP-L deformation with depth-ordering constraints
+            Debug.Log("[DomainStitching] Step 5: Applying ARAP-L deformation with depth constraints...");
+            var constraints = GenerateClosureConstraints();
+            if (constraints != null && constraints.Count > 0) {
+                Debug.Log($"[DomainStitching] Applying {constraints.Count} depth-ordering constraints...");
+                // Reduced iterations to prevent mesh distortion
+                inflater.ApplyARAPDeformation(ref finalMesh, constraints, iterations: 3);
+            } else {
+                Debug.Log("[DomainStitching] No depth constraints to apply.");
+            }
+
+            // Final statistics
+            Vector3 centroid = Vector3.zero;
+            Vector3[] verts = finalMesh.vertices;
+            foreach (var v in verts) centroid += v;
+            if (verts.Length > 0) centroid /= verts.Length;
+
+            Debug.Log($"[DomainStitching] Mesh generation complete. " +
+                      $"Vertices: {finalMesh.vertexCount}, " +
+                      $"Triangles: {finalMesh.triangles.Length / 3}, " +
+                      $"Centroid: {centroid.ToString("F3")}");
 
             return finalMesh;
         }
@@ -250,35 +322,67 @@ namespace mattatz.TeddySystem {
         public List<DeformationConstraint> GenerateClosureConstraints() {
             var constraints = new List<DeformationConstraint>();
 
-            foreach (var part in bodyParts) {
+            // Only apply constraints to open contours (attached parts like legs)
+            for (int partIdx = 0; partIdx < bodyParts.Count; partIdx++) {
+                var part = bodyParts[partIdx];
+                
                 if (part.frontFacing.isOpenContour) {
-                    // Inequality constraint: front half moves in front of body
-                    constraints.Add(new DeformationConstraint {
-                        type = ConstraintType.Inequality,
-                        targetZ = 1.0f,  // Move forward
-                        affectedVertices = GetBoundaryVertices(part.frontFacing)
-                    });
+                    Debug.Log($"[DomainStitching] Generating depth constraints for open contour part {partIdx}...");
+                    
+                    // Inequality constraint: front half boundary vertices must lift above body
+                    var frontBoundaryIndices = GetGlobalBoundaryVertices(part.frontFacing);
+                    if (frontBoundaryIndices.Count > 0) {
+                        constraints.Add(new DeformationConstraint {
+                            type = ConstraintType.Inequality,
+                            targetZ = 0.5f,  // Lift above the base plane
+                            affectedVertices = frontBoundaryIndices
+                        });
+                        Debug.Log($"[DomainStitching] Added inequality constraint for {frontBoundaryIndices.Count} front boundary vertices.");
+                    }
 
-                    // Equality constraint: back half aligns with body cavity
-                    constraints.Add(new DeformationConstraint {
-                        type = ConstraintType.Equality,
-                        affectedVertices = GetBoundaryVertices(part.backFacing)
-                    });
+                    // Equality constraint: back half stays pinned inside body
+                    var backBoundaryIndices = GetGlobalBoundaryVertices(part.backFacing);
+                    if (backBoundaryIndices.Count > 0) {
+                        constraints.Add(new DeformationConstraint {
+                            type = ConstraintType.Equality,
+                            affectedVertices = backBoundaryIndices
+                        });
+                        Debug.Log($"[DomainStitching] Added equality constraint for {backBoundaryIndices.Count} back boundary vertices.");
+                    }
                 }
             }
 
             return constraints;
         }
 
-        private List<int> GetBoundaryVertices(StitchedDomain domain) {
-            var boundary = new List<int>();
-            int boundarySize = domain.boundary.Count;
-
-            for (int i = 0; i < boundarySize; i++) {
-                boundary.Add(i);
+        /// <summary>
+        /// Get global vertex indices for boundary vertices of a domain in the merged mesh
+        /// IMPORTANT: This searches in the INFLATED mesh, not stitchedVertices
+        /// </summary>
+        private List<int> GetGlobalBoundaryVertices(StitchedDomain domain) {
+            var globalIndices = new List<int>();
+            
+            // NOTE: stitchedVertices are 2D (z=0), but after inflation vertices have height
+            // We need to match based on XY coordinates only
+            
+            // Search through stitchedVertices (2D planar) to find matching boundary vertices
+            for (int i = 0; i < stitchedVertices.Count; i++) {
+                Vector3 vert3D = stitchedVertices[i];
+                Vector2 vert2D = new Vector2(vert3D.x, vert3D.y);
+                
+                // Check if this vertex matches any boundary vertex
+                foreach (var boundaryVert in domain.boundary) {
+                    if (Vector2.Distance(vert2D, boundaryVert) < 0.01f) {
+                        if (!globalIndices.Contains(i)) {
+                            globalIndices.Add(i);
+                        }
+                        break;
+                    }
+                }
             }
-
-            return boundary;
+            
+            Debug.Log($"[DomainStitching] Found {globalIndices.Count} global boundary vertices for domain {domain.domainID}");
+            return globalIndices;
         }
 
         /// <summary>
@@ -377,6 +481,21 @@ namespace mattatz.TeddySystem {
             }
             if (result.Count > 1 && Vector2.Distance(result[0], result.Last()) < 0.001f) result.RemoveAt(result.Count - 1);
             return result;
+        }
+
+        /// <summary>
+        /// Ray casting algorithm for point-in-polygon test
+        /// </summary>
+        private bool IsPointInPolygon(Vector2 p, List<Vector2> poly) {
+            int n = poly.Count;
+            bool inside = false;
+            for (int i = 0, j = n - 1; i < n; j = i++) {
+                if (((poly[i].y > p.y) != (poly[j].y > p.y)) &&
+                    (p.x < (poly[j].x - poly[i].x) * (p.y - poly[i].y) / (poly[j].y - poly[i].y) + poly[i].x)) {
+                    inside = !inside;
+                }
+            }
+            return inside;
         }
 
         private Vector3 FindClosestJoint(Vector3 target, List<(Vector3, Vector3)> bones) {

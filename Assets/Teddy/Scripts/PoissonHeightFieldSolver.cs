@@ -11,7 +11,8 @@ namespace mattatz.TeddySystem {
     public class PoissonHeightFieldSolver {
 
         private float laplacianTolerance = 0.0001f;
-        private int maxIterations = 100;
+        private int maxIterations = 200;
+        private float jacobiDamping = 0.5f;
 
         /// <summary>
         /// Solve height fields across all domains using Poisson equation
@@ -285,7 +286,8 @@ namespace mattatz.TeddySystem {
                     }
 
                     if (Mathf.Abs(A[i, i]) > laplacianTolerance) {
-                        x_new[i] = (b[i] - sum) / A[i, i];
+                        float newValue = (b[i] - sum) / A[i, i];
+                        x_new[i] = Mathf.Lerp(x[i], newValue, jacobiDamping);
                     } else {
                         x_new[i] = x[i];
                     }

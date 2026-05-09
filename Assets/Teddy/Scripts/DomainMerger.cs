@@ -21,7 +21,8 @@ namespace mattatz.TeddySystem {
         private List<VertexMapping> vertexMap = new List<VertexMapping>();
         private List<Vector3> mergedVertices = new List<Vector3>();
         private List<int> mergedTriangles = new List<int>();
-        private float mergeThreshold = 0.001f;
+        public List<bool> triangleIsAppendage = new List<bool>();
+        private float mergeThreshold = 0.01f;  // Increased from 0.001f to find more matching vertices
 
         /// <summary>
         /// Merge multiple domains into a single connected domain
@@ -30,6 +31,7 @@ namespace mattatz.TeddySystem {
         public (List<Vector3>, List<int>) MergeDomains(List<DomainStitchingSystem.BodyPartConfig> bodyParts) {
             mergedVertices.Clear();
             mergedTriangles.Clear();
+            triangleIsAppendage.Clear();
             vertexMap.Clear();
 
             if (bodyParts == null || bodyParts.Count == 0) {
@@ -94,8 +96,25 @@ namespace mattatz.TeddySystem {
             }
 
             // Add triangles with offset
-            foreach (var tri in domain.triangles) {
-                mergedTriangles.Add(tri + vertexOffset);
+            // Back-facing domains (odd domainID) need reversed winding order
+            bool isBackFacing = (domainID % 2) == 1;
+            
+            if (isBackFacing) {
+                // Reverse winding order for back-facing triangles
+                for (int t = 0; t < domain.triangles.Count; t += 3) {
+                    mergedTriangles.Add(domain.triangles[t] + vertexOffset);
+                    mergedTriangles.Add(domain.triangles[t + 2] + vertexOffset);  // Swap t+1 and t+2
+                    mergedTriangles.Add(domain.triangles[t + 1] + vertexOffset);
+                    triangleIsAppendage.Add(domain.isAppendage);
+                }
+            } else {
+                // Keep normal winding order for front-facing triangles
+                for (int t = 0; t < domain.triangles.Count; t += 3) {
+                    mergedTriangles.Add(domain.triangles[t] + vertexOffset);
+                    mergedTriangles.Add(domain.triangles[t + 1] + vertexOffset);
+                    mergedTriangles.Add(domain.triangles[t + 2] + vertexOffset);
+                    triangleIsAppendage.Add(domain.isAppendage);
+                }
             }
         }
 
@@ -130,21 +149,78 @@ namespace mattatz.TeddySystem {
 
             if (front.vertices == null || back.vertices == null) return;
 
-            // Find corresponding boundary vertices between front and back
-            var boundaryPairs = MatchBoundaryVertices(front, back);
+            // Build complete contour including boundary and closure curve
+            var frontContour = new List<Vector2>(front.boundary);
+            if (front.closureCurve != null && front.closureCurve.Count > 0) {
+                frontContour.AddRange(front.closureCurve);
+            }
+            
+            var backContour = new List<Vector2>(back.boundary);
+            if (back.closureCurve != null && back.closureCurve.Count > 0) {
+                backContour.AddRange(back.closureCurve);
+            }
 
-            // Create triangles stitching front and back along boundaries
-            foreach (var (frontIdx, backIdx) in boundaryPairs) {
-                int f = FindGlobalVertexIndex(frontIdx, front.domainID);
-                int b = FindGlobalVertexIndex(backIdx, back.domainID);
+            // Stitch along the complete contour
+            int count = Mathf.Min(frontContour.Count, backContour.Count);
+            int stitchedQuads = 0;
+            int skippedQuads = 0;
+            
+            for (int i = 0; i < count; i++) {
+                int next = (i + 1) % count;
 
-                if (f >= 0 && b >= 0) {
-                    // Create stitching triangles (these will be hidden internally)
-                    mergedTriangles.Add(f);
-                    mergedTriangles.Add(b);
-                    mergedTriangles.Add(f);  // Degenerate for now; proper implementation would use edge quads
+                // Find global indices for the contour vertices
+                int f1 = FindVertexByPosition(front, frontContour[i]);
+                int f2 = FindVertexByPosition(front, frontContour[next]);
+                int b1 = FindVertexByPosition(back, backContour[i]);
+                int b2 = FindVertexByPosition(back, backContour[next]);
+
+                if (f1 >= 0 && f2 >= 0 && b1 >= 0 && b2 >= 0) {
+                    // Create side quad (f1, b1, b2) and (f1, b2, f2)
+                    mergedTriangles.Add(f1);
+                    mergedTriangles.Add(b1);
+                    mergedTriangles.Add(b2);
+                    triangleIsAppendage.Add(part.frontFacing.isAppendage);
+
+                    mergedTriangles.Add(f1);
+                    mergedTriangles.Add(b2);
+                    mergedTriangles.Add(f2);
+                    triangleIsAppendage.Add(part.frontFacing.isAppendage);
+                    
+                    stitchedQuads++;
+                } else {
+                    skippedQuads++;
+                    if (skippedQuads <= 5) {  // Only log first 5 to avoid spam
+                        Debug.LogWarning($"[DomainMerger] Skipped quad {i}: f1={f1}, f2={f2}, b1={b1}, b2={b2} " +
+                                       $"(front pos: {frontContour[i]}, back pos: {backContour[i]})");
+                    }
                 }
             }
+            
+            Debug.Log($"[DomainMerger] Stitched {stitchedQuads} quads, skipped {skippedQuads} quads for part {part.partID} (contour size: {count})");
+        }
+
+        private int FindVertexByPosition(DomainStitchingSystem.StitchedDomain domain, Vector2 pos) {
+            // First try exact match
+            float bestDist = float.MaxValue;
+            int bestIdx = -1;
+            
+            for (int i = 0; i < domain.vertices.Count; i++) {
+                float dist = Vector2.Distance(domain.vertices[i], pos);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestIdx = i;
+                }
+            }
+            
+            if (bestDist < mergeThreshold) {
+                return FindGlobalVertexIndex(bestIdx, domain.domainID);
+            }
+            
+            // If no match found, create a new vertex at this position
+            Debug.LogWarning($"[DomainMerger] No vertex found for position {pos} in domain {domain.domainID}, creating new vertex. Best distance was {bestDist}");
+            int newIdx = mergedVertices.Count;
+            mergedVertices.Add(new Vector3(pos.x, pos.y, 0f));
+            return newIdx;
         }
 
         /// <summary>
@@ -205,16 +281,24 @@ namespace mattatz.TeddySystem {
                 }
             }
 
-            // Create a thin "hole" by forming degenerate triangles along the boundary
-            // This will be the connection point for attaching other parts
+            // Attach back-facing boundary to front-facing hole
             for (int i = 0; i < duplicatedVertices.Count - 1; i++) {
-                int v1 = duplicatedVertices[i];
-                int v2 = duplicatedVertices[i + 1];
+                int f1 = FindGlobalVertexIndex(i, front.domainID);
+                int f2 = FindGlobalVertexIndex(i + 1, front.domainID);
+                int b1 = duplicatedVertices[i];
+                int b2 = duplicatedVertices[i + 1];
 
-                // Degenerate triangle forming the hole edge
-                mergedTriangles.Add(v1);
-                mergedTriangles.Add(v2);
-                mergedTriangles.Add(v1);
+                if (f1 >= 0 && f2 >= 0) {
+                    mergedTriangles.Add(f1);
+                    mergedTriangles.Add(b1);
+                    mergedTriangles.Add(b2);
+                    triangleIsAppendage.Add(part.frontFacing.isAppendage);
+
+                    mergedTriangles.Add(f1);
+                    mergedTriangles.Add(b2);
+                    mergedTriangles.Add(f2);
+                    triangleIsAppendage.Add(part.frontFacing.isAppendage);
+                }
             }
         }
 
@@ -242,6 +326,7 @@ namespace mattatz.TeddySystem {
 
                 if (v1 == v2 || v2 == v3 || v1 == v3) {
                     mergedTriangles.RemoveRange(i, 3);
+                    triangleIsAppendage.RemoveAt(i / 3);
                 }
             }
 

@@ -12,6 +12,7 @@ using UnityEditor;
 
 using mattatz.Utils;
 using mattatz.Triangulation2DSystem;
+using mattatz.TeddySystem;
 
 namespace mattatz.TeddySystem.Example {
 
@@ -49,6 +50,8 @@ namespace mattatz.TeddySystem.Example {
 
 		[Header("Domain Stitching (Advanced)")]
 		[SerializeField] bool useDomainStitching = false;
+		[SerializeField] bool useFullPipeline = false; // Enable Phases 2-5
+		[SerializeField] bool useARAPLayering = false; // Enable Phase 5 (ARAP-L)
 
 		OperationMode mode;
 
@@ -59,6 +62,7 @@ namespace mattatz.TeddySystem.Example {
 		// Domain Stitching System
 		DomainStitchingSystem stitchingSystem;
 		List<List<Vector2>> multiPartContours = new List<List<Vector2>>();  // Accumulated sketches for refinement/stitching
+		SketchCollection sketchCollection = new SketchCollection();          // Phase 2: Individual sketch info
 
 		Camera cam;
 		float screenZ = 0f;
@@ -468,19 +472,97 @@ namespace mattatz.TeddySystem.Example {
 			}
 		}
 
-		void Build () {
-			if (points.Count < 3 && multiPartContours.Count == 0) return;
+	void Build () {
+		if (points.Count < 3 && multiPartContours.Count == 0) return;
 
-			if (points.Count >= 3) {
-				points = Utils2D.Constrain(points, threshold);
+		if (points.Count >= 3) {
+			points = Utils2D.Constrain(points, threshold);
+		}
+
+		// Choose build method based on mode
+		if (useDomainStitching && (multiPartContours.Count > 0 || points.Count > 3)) {
+			BuildWithDomainStitching();
+		} else {
+			BuildTraditional();
+		}
+
+		// Save current session sketches to collection before clearing
+		foreach (var contour in multiPartContours) {
+			sketchCollection.AddSketch(contour);
+		}
+		if (points.Count > 3) {
+			sketchCollection.AddSketch(new List<Vector2>(points));
+		}
+
+		// Print 4 sample points for legs as requested
+		var savedAppendages = sketchCollection.GetAppendages();
+		foreach (var app in savedAppendages) {
+			string samples = "";
+			for (int j = 0; j < Mathf.Min(4, app.contour.Count); j++) {
+				samples += $"({app.contour[j].x:F3}, {app.contour[j].y:F3}) ";
 			}
+			Debug.Log($"[Drawer] Leg Sketch Sample Points (XY): {samples}");
+		}
 
-			if (useDomainStitching) {
-				BuildWithDomainStitching();
-			} else {
-				BuildTraditional();
+		// Post-process: Push appendages (legs/arms) forward in Z
+		if (activePuppet != null) {
+			PushAppendagesForward(activePuppet, sketchCollection);
+		}
+
+		ClearAll();
+	}
+
+	/// <summary>
+	/// Offsets the Z position of mesh vertices that belong to appendage sketches.
+	/// This pushes limbs (legs, arms) forward for better depth layering.
+	/// </summary>
+	void PushAppendagesForward(Puppet puppet, SketchCollection collection) {
+		var appendages = collection.GetAppendages();
+		if (appendages.Count == 0) return;
+
+		MeshFilter mf = puppet.GetComponent<MeshFilter>();
+		if (mf == null || mf.sharedMesh == null) return;
+
+		Mesh mesh = mf.sharedMesh;
+		Vector3[] vertices = mesh.vertices;
+		float zOffset = 0.4f; // Push forward amount
+
+		bool modified = false;
+		foreach (var app in appendages) {
+			for (int i = 0; i < vertices.Length; i++) {
+				Vector2 p2D = new Vector2(vertices[i].x, vertices[i].y);
+				if (IsPointInPolygon(p2D, app.contour)) {
+					vertices[i].z += zOffset;
+					modified = true;
+				}
 			}
 		}
+
+		if (modified) {
+			mesh.vertices = vertices;
+			mesh.RecalculateNormals();
+			mesh.RecalculateBounds();
+			
+			// Update collider if it exists
+			MeshCollider mc = puppet.GetComponent<MeshCollider>();
+			if (mc != null) mc.sharedMesh = mesh;
+		}
+	}
+
+	/// <summary>
+	/// Helper for point-in-polygon test (ray casting algorithm)
+	/// </summary>
+	bool IsPointInPolygon(Vector2 p, List<Vector2> poly) {
+		int n = poly.Count;
+		bool inside = false;
+		for (int i = 0, j = n - 1; i < n; j = i++) {
+			if (((poly[i].y > p.y) != (poly[j].y > p.y)) &&
+				(p.x < (poly[j].x - poly[i].x) * (p.y - poly[i].y) / (poly[j].y - poly[i].y) + poly[i].x)) {
+				inside = !inside;
+			}
+		}
+		return inside;
+	}
 
 		/// <summary>
 		/// Traditional mesh building (original Teddy method)
@@ -495,39 +577,286 @@ namespace mattatz.TeddySystem.Example {
 			CreatePuppet(mesh, bones);
 		}
 
-		/// <summary>
-		/// Build mesh using Domain Stitching Algorithm
-		/// Supports multiple body parts with proper mesh closure
-		/// </summary>
-		void BuildWithDomainStitching () {
-			Debug.Log("[Drawer] Starting build with Domain Stitching...");
-			stitchingSystem = new DomainStitchingSystem();
+	/// <summary>
+	/// Build mesh using Domain Stitching Algorithm
+	/// Phase 1: Extract outer contour
+	/// Phase 2: Keep individual sketch info for body/appendage classification
+	/// Phase 3: Triangulate sketches and create holes
+	/// </summary>
+void BuildWithDomainStitching () {
+	Debug.Log("[Drawer] Domain Stitching: Starting...");
+	
+	try {
+		// Collect all contours
+		var contoursToBuild = new List<List<Vector2>>();
+		foreach (var c in multiPartContours) contoursToBuild.Add(new List<Vector2>(c));
+		if (points.Count > 3) contoursToBuild.Add(new List<Vector2>(points));
 
-			var contoursToBuild = new List<List<Vector2>>();
-			foreach (var c in multiPartContours) contoursToBuild.Add(new List<Vector2>(c));
-			if (points.Count > 3) contoursToBuild.Add(new List<Vector2>(points));
+		if (contoursToBuild.Count == 0) {
+			Debug.LogWarning("[Domain Stitching] No contours to build!");
+			return;
+		}
 
-			if (contoursToBuild.Count == 0) return;
+		Debug.Log($"[Domain Stitching] Processing {contoursToBuild.Count} contours");
 
-			List<bool> isOpenList = new List<bool>();
-			foreach (var contour in contoursToBuild) {
-				float endDistance = Vector2.Distance(contour[0], contour[contour.Count - 1]);
-				isOpenList.Add(endDistance > 0.1f);
+		// SIMPLIFIED APPROACH: Just use outer contour extraction (Phase 1)
+		// Skip complex stitching for now to avoid freeze
+		Debug.Log("[Phase 1] Extracting outer contour...");
+		List<Vector2> outerContour = ExtractOuterContour(contoursToBuild);
+		
+		if (outerContour == null || outerContour.Count < 3) {
+			Debug.LogError("[Phase 1] Failed to extract outer contour! Falling back to traditional build.");
+			BuildTraditional();
+			return;
+		}
+
+		Debug.Log($"[Phase 1] Extracted outer contour with {outerContour.Count} points");
+		
+		// Build traditional Teddy mesh with the outer contour
+		teddy = new Teddy(outerContour);
+		var mesh = teddy.Build(smoothHeightFields ? MeshSmoothingMethod.HC : MeshSmoothingMethod.None, 2, 0.2f, 0.75f, inflationAmount);
+		var bones = teddy.GetSkeletonBones();
+
+		CreatePuppet(mesh, bones);
+		
+		Debug.Log("[Domain Stitching] Complete - built mesh from outer contour");
+		
+	} catch (System.Exception ex) {
+		Debug.LogError($"[Domain Stitching] Exception: {ex.Message}\n{ex.StackTrace}");
+		Debug.LogError("[Domain Stitching] Falling back to traditional build");
+		
+		// Fallback to traditional build
+		if (points.Count >= 3) {
+			BuildTraditional();
+		}
+	}
+}
+
+	/// <summary>
+	/// Extract boundary from a 2D mesh (vertices + triangles)
+	/// Finds all edges that belong to only one triangle (boundary edges)
+	/// </summary>
+	List<Vector2> ExtractBoundaryFromMesh(List<Vector2> vertices, List<int> triangles) {
+		if (vertices == null || triangles == null || triangles.Count < 3) {
+			Debug.LogWarning("[ExtractBoundary] Invalid mesh data");
+			return null;
+		}
+
+		Debug.Log($"[ExtractBoundary] Processing {vertices.Count} vertices, {triangles.Count / 3} triangles");
+
+		// Count edge occurrences (boundary edges appear only once)
+		Dictionary<(int, int), int> edgeCount = new Dictionary<(int, int), int>();
+
+		for (int i = 0; i < triangles.Count; i += 3) {
+			int v0 = triangles[i];
+			int v1 = triangles[i + 1];
+			int v2 = triangles[i + 2];
+
+			// Validate indices
+			if (v0 < 0 || v0 >= vertices.Count || v1 < 0 || v1 >= vertices.Count || v2 < 0 || v2 >= vertices.Count) {
+				Debug.LogWarning($"[ExtractBoundary] Invalid triangle indices: {v0}, {v1}, {v2}");
+				continue;
 			}
 
-			stitchingSystem.InitializeFromContours(contoursToBuild, isOpenList);
-			var mesh = stitchingSystem.GenerateStitchedMesh(inflationAmount, smoothHeightFields);
+			// Add 3 edges (order matters: use min,max to normalize)
+			AddEdge(edgeCount, v0, v1);
+			AddEdge(edgeCount, v1, v2);
+			AddEdge(edgeCount, v2, v0);
+		}
 
-			if (mesh != null) {
-				// For domain stitching, we now extract the skeleton from each part's chordal axis
-				var bones = stitchingSystem.GetSkeletonBones();
-				CreatePuppet(mesh, bones);
-
-				// Log statistics
-				var (vCount, tCount, dCount) = stitchingSystem.GetMeshStats();
-				Debug.Log($"[Domain Stitching] Vertices: {vCount}, Triangles: {tCount}, Domains: {dCount}");
+		// Find boundary edges (count == 1)
+		List<(int, int)> boundaryEdges = new List<(int, int)>();
+		foreach (var kvp in edgeCount) {
+			if (kvp.Value == 1) {
+				boundaryEdges.Add(kvp.Key);
 			}
 		}
+
+		if (boundaryEdges.Count == 0) {
+			Debug.LogWarning("[ExtractBoundary] No boundary edges found!");
+			return null;
+		}
+
+		Debug.Log($"[ExtractBoundary] Found {boundaryEdges.Count} boundary edges");
+
+		// Sort edges to form a continuous loop
+		List<int> boundaryIndices = new List<int>();
+		var edgeDict = new Dictionary<int, List<int>>();
+		foreach (var (a, b) in boundaryEdges) {
+			if (!edgeDict.ContainsKey(a)) edgeDict[a] = new List<int>();
+			if (!edgeDict.ContainsKey(b)) edgeDict[b] = new List<int>();
+			edgeDict[a].Add(b);
+			edgeDict[b].Add(a);
+		}
+
+		// Start from any boundary vertex
+		int current = boundaryEdges[0].Item1;
+		int start = current;
+		boundaryIndices.Add(current);
+
+		int maxIterations = vertices.Count * 2; // Safety limit
+		int iterations = 0;
+
+		while (iterations < maxIterations) {
+			iterations++;
+
+			if (!edgeDict.ContainsKey(current)) {
+				Debug.LogWarning($"[ExtractBoundary] Current vertex {current} not in edge dict!");
+				break;
+			}
+
+			var neighbors = edgeDict[current];
+			int next = -1;
+			foreach (var n in neighbors) {
+				if (boundaryIndices.Count == 1 || n != boundaryIndices[boundaryIndices.Count - 2]) {
+					next = n;
+					break;
+				}
+			}
+
+			if (next < 0) {
+				Debug.LogWarning($"[ExtractBoundary] No next vertex found at iteration {iterations}");
+				break;
+			}
+
+			if (next == start) {
+				Debug.Log($"[ExtractBoundary] Loop closed at iteration {iterations}");
+				break;
+			}
+
+			boundaryIndices.Add(next);
+			current = next;
+		}
+
+		if (iterations >= maxIterations) {
+			Debug.LogError($"[ExtractBoundary] Hit max iterations ({maxIterations})! Possible infinite loop.");
+		}
+
+		// Convert indices to positions
+		List<Vector2> boundary = new List<Vector2>();
+		foreach (var idx in boundaryIndices) {
+			if (idx >= 0 && idx < vertices.Count) {
+				boundary.Add(vertices[idx]);
+			}
+		}
+
+		Debug.Log($"[ExtractBoundary] Extracted {boundary.Count} boundary points from {vertices.Count} vertices");
+		return boundary;
+	}
+
+	void AddEdge(Dictionary<(int, int), int> dict, int a, int b) {
+		var key = a < b ? (a, b) : (b, a);
+		if (!dict.ContainsKey(key)) dict[key] = 0;
+		dict[key]++;
+	}
+
+	/// <summary>
+	/// Phase 1: Extract outer contour from multiple sketches via rasterization
+	/// </summary>
+	List<Vector2> ExtractOuterContour(List<List<Vector2>> contours) {
+		if (contours == null || contours.Count == 0) return null;
+
+		Debug.Log($"[ExtractOuterContour] Processing {contours.Count} contours");
+
+		// 1. Find bounding box
+		float minX = float.MaxValue, minY = float.MaxValue;
+		float maxX = float.MinValue, maxY = float.MinValue;
+		foreach (var c in contours) {
+			foreach (var p in c) {
+				minX = Mathf.Min(minX, p.x);
+				minY = Mathf.Min(minY, p.y);
+				maxX = Mathf.Max(maxX, p.x);
+				maxY = Mathf.Max(maxY, p.y);
+			}
+		}
+
+		// Add padding
+		float width = maxX - minX;
+		float height = maxY - minY;
+		float margin = Mathf.Max(width, height) * 0.15f; // Increased padding
+		minX -= margin; minY -= margin; maxX += margin; maxY += margin;
+		width = maxX - minX; height = maxY - minY;
+
+		Debug.Log($"[ExtractOuterContour] Bounds: ({minX:F2}, {minY:F2}) to ({maxX:F2}, {maxY:F2})");
+
+		// 2. Setup Rasterization with higher resolution
+		int res = 1024; // Increased from 512 for better quality
+		RenderTexture rt = RenderTexture.GetTemporary(res, res, 0, RenderTextureFormat.Default);
+		RenderTexture.active = rt;
+		GL.Clear(true, true, Color.clear);
+
+		// Use a simple material to draw filled polygons
+		Material mat = new Material(Shader.Find("Hidden/Internal-Colored"));
+		mat.SetPass(0);
+
+		GL.PushMatrix();
+		GL.LoadPixelMatrix(0, res, 0, res);
+		GL.Begin(GL.TRIANGLES);
+		GL.Color(Color.white);
+
+		// Rasterize all contours
+		int triangleCount = 0;
+		foreach (var c in contours) {
+			try {
+				var polygon = Polygon2D.Contour(c.ToArray());
+				var triangulation = new Triangulation2D(polygon, 0f);
+				foreach (var t in triangulation.Triangles) {
+					Vector2 p0 = MapToRT(t.a.Coordinate, minX, minY, width, height, res);
+					Vector2 p1 = MapToRT(t.b.Coordinate, minX, minY, width, height, res);
+					Vector2 p2 = MapToRT(t.c.Coordinate, minX, minY, width, height, res);
+					GL.Vertex3(p0.x, p0.y, 0);
+					GL.Vertex3(p1.x, p1.y, 0);
+					GL.Vertex3(p2.x, p2.y, 0);
+					triangleCount++;
+				}
+			} catch (System.Exception ex) {
+				Debug.LogWarning($"[ExtractOuterContour] Failed to triangulate contour: {ex.Message}");
+			}
+		}
+		GL.End();
+		GL.PopMatrix();
+
+		Debug.Log($"[ExtractOuterContour] Rasterized {triangleCount} triangles");
+
+		// 3. Read pixels and extract contour
+		Texture2D tex = new Texture2D(res, res, TextureFormat.RGBA32, false);
+		tex.ReadPixels(new Rect(0, 0, res, res), 0, 0);
+		tex.Apply();
+
+		var rawContour = TextureContourExtractor.ExtractContour(tex);
+		
+		Debug.Log($"[ExtractOuterContour] Raw contour: {rawContour.Count} points");
+
+		// 4. Transform back to world coordinates
+		List<Vector2> result = new List<Vector2>();
+		foreach (var p in rawContour) {
+			float px = (p.x * res) + res * 0.5f;
+			float py = (p.y * res) + res * 0.5f;
+			
+			float wx = minX + (px / (float)res) * width;
+			float wy = minY + (py / (float)res) * height;
+			result.Add(new Vector2(wx, wy));
+		}
+
+		// 5. Simplify, Smooth and ensure closure (balanced for speed)
+		int originalCount = result.Count;
+		result = SketchCleaner.Clean(result, threshold * 1.5f); // More aggressive for speed
+		Debug.Log($"[ExtractOuterContour] After clean: {result.Count} points (from {originalCount})");
+		
+		result = SketchCleaner.Smooth(result, 2);
+		Debug.Log($"[ExtractOuterContour] After smooth: {result.Count} points");
+		
+		result = SketchCleaner.EnsureClosure(result, threshold);
+		Debug.Log($"[ExtractOuterContour] Final: {result.Count} points");
+
+		// Cleanup
+		RenderTexture.active = null;
+		RenderTexture.ReleaseTemporary(rt);
+		Destroy(tex);
+		Destroy(mat);
+
+		return result;
+	}
 
 		/// <summary>
 		/// Create a puppet from mesh and bones
@@ -562,6 +891,14 @@ namespace mattatz.TeddySystem.Example {
 		void ClearAll() {
 			points.Clear();
 			multiPartContours.Clear();
+			// Keep only appendages for later display
+			if (sketchCollection != null) {
+				var appendages = sketchCollection.GetAppendages();
+				sketchCollection.Clear();
+				foreach (var app in appendages) {
+					sketchCollection.sketches.Add(app);
+				}
+			}
 		}
 
 		public void Save () {
@@ -606,6 +943,17 @@ namespace mattatz.TeddySystem.Example {
 				foreach (var contour in multiPartContours) {
 					for (int i = 0, n = contour.Count - 1; i < n; i++) {
 						GL.Vertex(contour[i]); GL.Vertex(contour[i + 1]);
+					}
+				}
+				GL.End();
+
+				// Draw saved appendages from previous builds
+				lineMat.SetColor("_Color", new Color(0.2f, 0.8f, 1f, 0.6f)); // Light blue for saved appendages
+				lineMat.SetPass(0);
+				GL.Begin(GL.LINES);
+				foreach (var sketch in sketchCollection.GetAppendages()) {
+					for (int i = 0, n = sketch.contour.Count - 1; i < n; i++) {
+						GL.Vertex(sketch.contour[i]); GL.Vertex(sketch.contour[i + 1]);
 					}
 				}
 				GL.End();
@@ -1019,7 +1367,9 @@ namespace mattatz.TeddySystem.Example {
 
 				if (GUI.Button(new Rect(bx + 120, by + 10, 110, 30), "ADD PART", style)) {
 					if (points.Count > 3) {
-						multiPartContours.Add(new List<Vector2>(points));
+						var contour = new List<Vector2>(points);
+						multiPartContours.Add(contour);
+						// We don't add to sketchCollection here yet, we'll do it in Build() or Keep all in sync
 						points.Clear();
 						mode = OperationMode.Draw;
 					}
