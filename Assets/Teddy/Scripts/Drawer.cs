@@ -132,6 +132,10 @@ namespace mattatz.TeddySystem.Example {
 
 		void Start () {
 			cam = Camera.main;
+			if (cam != null) {
+				cam.backgroundColor = Color.white;
+				cam.clearFlags = CameraClearFlags.SolidColor;
+			}
 			screenZ = Mathf.Abs(cam.transform.position.z - transform.position.z);
 
 			points = new List<Vector2>();
@@ -928,7 +932,7 @@ void BuildWithDomainStitching () {
 			if(points != null) {
 				GL.PushMatrix();
 				GL.MultMatrix (transform.localToWorldMatrix);
-				lineMat.SetColor("_Color", Color.white);
+				lineMat.SetColor("_Color", Color.black);
 				lineMat.SetPass(0);
 				GL.Begin(GL.LINES);
 				for(int i = 0, n = points.Count - 1; i < n; i++) {
@@ -937,7 +941,7 @@ void BuildWithDomainStitching () {
 				GL.End();
 				
 				// Draw accumulated parts
-				lineMat.SetColor("_Color", new Color(1f, 1f, 1f, 0.4f));
+				lineMat.SetColor("_Color", new Color(0f, 0f, 0f, 0.4f));
 				lineMat.SetPass(0);
 				GL.Begin(GL.LINES);
 				foreach (var contour in multiPartContours) {
@@ -965,7 +969,7 @@ void BuildWithDomainStitching () {
 			if (mode == OperationMode.LassoJoint && lassoPoints != null && lassoPoints.Count > 1) {
 				GL.PushMatrix();
 				GL.LoadPixelMatrix();
-				lineMat.SetColor("_Color", new Color(1f, 1f, 0f, 0.9f));
+				lineMat.SetColor("_Color", new Color(0f, 0.5f, 1f, 0.9f)); // Blue lasso for better visibility on white
 				lineMat.SetPass(0);
 				GL.Begin(GL.LINES);
 				for (int i = 0; i < lassoPoints.Count - 1; i++) {
@@ -1022,7 +1026,7 @@ void BuildWithDomainStitching () {
 			// ── Domain Stitching Controls ────────────────────────────────────
 			GUIStyle labelStyle = new GUIStyle(GUI.skin.label);
 			labelStyle.fontSize = 14;
-			labelStyle.normal.textColor = Color.white;
+			labelStyle.normal.textColor = Color.black;
 
 			GUI.Box(new Rect(Screen.width - 210, 10, 200, 140), GUIContent.none);
 			GUI.Label(new Rect(Screen.width - 200, 15, 180, 20), "─ Mesh Generation ─", labelStyle);
@@ -1100,7 +1104,7 @@ void BuildWithDomainStitching () {
 
 					GUIStyle lbl = new GUIStyle(GUI.skin.label);
 					lbl.fontSize = 16;
-					lbl.normal.textColor = Color.white;
+					lbl.normal.textColor = Color.black;
 
 					GUI.Box(panelRect, GUIContent.none);
 					GUI.Label(new Rect(px, py, 200, 22),
@@ -1133,7 +1137,7 @@ void BuildWithDomainStitching () {
 				float rx = Screen.width - 210;
 				GUIStyle lbl = new GUIStyle(GUI.skin.label);
 				lbl.fontSize = 16;
-				lbl.normal.textColor = Color.white;
+				lbl.normal.textColor = Color.black;
 
 				GUI.Box(new Rect(rx - 5, 5, 215, 280), GUIContent.none);
 				GUI.Label(new Rect(rx, 10, 200, 24), "─── Edit Rig ───", lbl);
@@ -1188,7 +1192,7 @@ void BuildWithDomainStitching () {
 				float rx = Screen.width - 210;
 				GUIStyle lbl = new GUIStyle(GUI.skin.label);
 				lbl.fontSize = 16;
-				lbl.normal.textColor = Color.white;
+				lbl.normal.textColor = Color.black;
 
 				GUI.Box(new Rect(rx - 5, 5, 215, 280), GUIContent.none);
 				GUI.Label(new Rect(rx, 10, 200, 24), "── Anim Mode ──", lbl);

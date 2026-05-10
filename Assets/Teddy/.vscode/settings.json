@@ -1,0 +1,46 @@
+{
+    "latex-workshop.latex.autoBuild.run": "never",
+    "latex-workshop.latex.tools": [
+        {
+            "name": "xelatex",
+            "command": "xelatex",
+            "args": [
+                "-synctex=1",
+                "-interaction=nonstopmode",
+                "-file-line-error",
+                "-shell-escape",
+                "%DOC%"
+            ]
+        },
+        {
+            "name": "bibtex",
+            "command": "bibtex",
+            "args": [
+                "%DOCFILE%"
+            ]
+        }
+    ],
+    "latex-workshop.latex.recipes": [
+        {
+            "name": "XeLaTeX -> BibTeX -> XeLaTeX*2",
+            "tools": ["xelatex", "bibtex", "xelatex", "xelatex"]
+        }
+    ],
+    "latex-workshop.latex.recipe.default": "XeLaTeX -> BibTeX -> XeLaTeX*2",
+    "latex-workshop.view.pdf.viewer": "tab",
+    "latex-workshop.latex.clean.enabled": true,
+    "latex-workshop.latex.autoClean.run": "onBuilt",
+    "editor.inlineSuggest.enabled": false,
+    "[latex]": {
+        "editor.inlineSuggest.enabled": false,
+        "editor.quickSuggestions": {
+            "other": false,
+            "comments": false,
+            "strings": false
+        }
+    },
+    "latex-workshop.message.error.show": false,
+    "latex-workshop.message.warning.show": false,
+    "latex-workshop.message.info.show": false,
+    "latex-workshop.latex.build.forceStatusbarError": true
+}

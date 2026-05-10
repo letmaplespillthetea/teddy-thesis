@@ -417,7 +417,7 @@ namespace mattatz.TeddySystem.Example {
 
 					if (i == draggingJoint) {
 						GL.End();
-						lineMat.SetColor("_Color", Color.white);
+						lineMat.SetColor("_Color", Color.yellow);
 						lineMat.SetPass(0);
 						GL.Begin(GL.TRIANGLES);
 						DrawFilledDisc(sx, sy, jointRadius * 1.5f, 16);
