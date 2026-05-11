@@ -42,13 +42,20 @@ Shader "Teddy/Demo/Mesh" {
 		ENDCG
 
 		Pass {
-			Cull Back
+			Cull Off
 			CGPROGRAM
 			#pragma vertex vert
 			#pragma fragment frag
-			fixed4 frag (v2f i) : SV_Target {
-				fixed4 col = fixed4(normal_color(i.normal), 1);
-				return col;
+			half4 frag (v2f IN) : SV_Target {
+				float3 dx = ddx(IN.screenPos.xyz);
+				float3 dy = ddy(IN.screenPos.xyz);
+				float3 normal = normalize(cross(dx, dy));
+
+				half d = dot(normal, normalize(float3(0.5, -0.75, 0.5))) * _ToonParams.x + _ToonParams.y;
+				d = saturate(d);
+				half3 ramp = tex2D(_Ramp, float2(d, d)).rgb;
+				ramp = pow(ramp, _ToonParams.z);
+				return half4(ramp, 1) * _Color;
 			}
 			ENDCG
 		}

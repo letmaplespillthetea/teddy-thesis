@@ -382,8 +382,15 @@ namespace mattatz.TeddySystem.Example {
 					if (isAnimationPlaying && recordedMotions.ContainsKey(i) && (!isRecordingAnim || i != animSelectedJoint)) {
 						int frame = animCurrentFrame;
 						if (frame >= recordedMotions[i].Count) frame = recordedMotions[i].Count - 1;
-						worldJoints[i] = recordedMotions[i][frame];
-						prevWorldJoints[i] = worldJoints[i];
+
+						if (pinnedJoints.Contains(i)) {
+							// If a pinned joint has recorded motion, it drives the entire transform
+							Vector3 delta = recordedMotions[i][frame] - worldJoints[i];
+							MoveTransform(delta);
+						} else {
+							worldJoints[i] = recordedMotions[i][frame];
+							prevWorldJoints[i] = worldJoints[i];
+						}
 						continue;
 					}
 
@@ -455,6 +462,17 @@ namespace mattatz.TeddySystem.Example {
 				mesh.vertices = skinning.Deform(skeletonBones);
 				mesh.RecalculateNormals();
 				mesh.RecalculateBounds();
+
+				// Update collider if we're in surface drawing mode so raycasts hit the deformed shape
+				if (GetComponentInParent<Drawer>() != null && GetComponentInParent<Drawer>().isAnimationMode == false) {
+					// We only want to update collider if the drawer is in DrawOnSurface mode
+					// But Puppet doesn't know the mode directly, so we'll check it via a more robust way if needed
+					// For now, let's just make sure the collider at least matches the mesh if it's the same object
+					if (col.sharedMesh == mesh) {
+						col.sharedMesh = null;
+						col.sharedMesh = mesh;
+					}
+				}
 			} else {
 				for(int i=0; i<joints.Count; i++) {
 					if (i != draggingJoint) worldJoints[i] = transform.TransformPoint(restLocalPositions[i]);
@@ -659,15 +677,28 @@ namespace mattatz.TeddySystem.Example {
 		}
 
 		public void MoveJoint(Vector3 targetWorld) {
-			if (animSelectedJoint >= 0) {
-				if (animSelectedJoint < worldJoints.Count) {
-					worldJoints[animSelectedJoint] = targetWorld - dragOffsetWorld;
+			Vector3 targetPos = targetWorld - dragOffsetWorld;
+			if (animSelectedJoint >= 0 && animSelectedJoint < worldJoints.Count) {
+				if (pinnedJoints.Contains(animSelectedJoint)) {
+					// Dragging a pinned joint moves the entire character
+					Vector3 delta = targetPos - worldJoints[animSelectedJoint];
+					MoveTransform(delta);
+				} else {
+					worldJoints[animSelectedJoint] = targetPos;
 				}
 			} else if (animSelectedBluePoint >= 0) {
 				BluePoint bp = bluePoints[animSelectedBluePoint];
-				worldJoints[bp.attachedJoint] = targetWorld - dragOffsetWorld;
+				worldJoints[bp.attachedJoint] = targetPos;
 			} else if (draggingJoint >= 0 && draggingJoint < joints.Count) {
-				worldJoints[draggingJoint] = targetWorld - dragOffsetWorld;
+				worldJoints[draggingJoint] = targetPos;
+			}
+		}
+
+		private void MoveTransform(Vector3 delta) {
+			transform.position += delta;
+			for (int i = 0; i < worldJoints.Count; i++) {
+				worldJoints[i] += delta;
+				prevWorldJoints[i] += delta;
 			}
 		}
 
@@ -1179,6 +1210,193 @@ namespace mattatz.TeddySystem.Example {
 				GL.Vertex3(cx + Mathf.Cos(a0) * r, cy + Mathf.Sin(a0) * r, 0f);
 				GL.Vertex3(cx + Mathf.Cos(a1) * r, cy + Mathf.Sin(a1) * r, 0f);
 			}
+		}
+
+		/// <summary>
+		/// Paint on the surface using raycasting hit point.
+		/// Projects the 3D hit point to texture coordinates and paints with a brush.
+		/// </summary>
+		public void PaintOnSurface(RaycastHit hit, Color32 brushColor, float brushRadius) {
+			// Initialize texture if it doesn't exist
+			if (mainTexture == null) {
+				CreateDefaultTexture();
+			}
+
+			if (mainTexture == null) {
+				Debug.LogError("[PaintOnSurface] Failed to create texture!");
+				return;
+			}
+
+			// Initialize pixel arrays if not already done
+			if (currentWorkingPixels == null || currentWorkingPixels.Length == 0) {
+				backupPixels = mainTexture.GetPixels32();
+				appliedPixels = mainTexture.GetPixels32();
+				currentWorkingPixels = mainTexture.GetPixels32();
+			}
+
+			if (currentWorkingPixels == null || currentWorkingPixels.Length == 0) {
+				Debug.LogError("[PaintOnSurface] Failed to initialize pixel arrays!");
+				return;
+			}
+
+			// Ensure the mesh has UV coordinates
+			Mesh mesh = filter.sharedMesh;
+			if (mesh != null && (mesh.uv == null || mesh.uv.Length == 0)) {
+				GeneratePlanarUVs(mesh);
+			}
+
+			// Get UV coordinates from the mesh at the hit point
+			// Fallback: if mesh UVs are still returning 0,0, calculate planar UV directly from hit point
+			Vector2 hitUV = GetHitUV(mesh, hit);
+			if (hitUV.sqrMagnitude < 1e-6f) {
+				hitUV = CalculatePlanarUV(mesh, hit.point);
+			}
+			
+			int w = mainTexture.width;
+			int h = mainTexture.height;
+			
+			// Convert UV to pixel coordinates
+			int centerX = Mathf.FloorToInt(hitUV.x * w);
+			int centerY = Mathf.FloorToInt(hitUV.y * h);
+			
+			// Clamp to texture bounds
+			centerX = Mathf.Clamp(centerX, 0, w - 1);
+			centerY = Mathf.Clamp(centerY, 0, h - 1);
+			
+			// Paint circular brush area
+			int brushRadiusPixels = Mathf.Max(1, Mathf.FloorToInt(brushRadius));
+			float brushRadiusSq = brushRadius * brushRadius;
+
+			for (int y = centerY - brushRadiusPixels; y <= centerY + brushRadiusPixels; y++) {
+				if (y < 0 || y >= h) continue;
+				for (int x = centerX - brushRadiusPixels; x <= centerX + brushRadiusPixels; x++) {
+					if (x < 0 || x >= w) continue;
+
+					// Check if pixel is within brush circle
+					float dx = x - centerX;
+					float dy = y - centerY;
+					if (dx * dx + dy * dy <= brushRadiusSq) {
+						int idx = y * w + x;
+						currentWorkingPixels[idx] = brushColor;
+						appliedPixels[idx] = brushColor;
+					}
+				}
+			}
+
+			// Apply changes to texture
+			mainTexture.SetPixels32(currentWorkingPixels);
+			mainTexture.Apply();
+
+			// IMPORTANT: Update MaterialPropertyBlock to ensure the texture is actually displayed
+			// if a property block was already overriding the material's texture.
+			var rnd = GetComponent<MeshRenderer>();
+			MaterialPropertyBlock block = new MaterialPropertyBlock();
+			rnd.GetPropertyBlock(block);
+			block.SetTexture("_MainTex", mainTexture);
+			block.SetColor("_Color", Color.white); // Ensure color doesn't tint it too much if it was set before
+			rnd.SetPropertyBlock(block);
+
+			Debug.Log($"[Puppet] Painted at UV {hitUV.ToString("F3")}, Pixel ({centerX}, {centerY}). Color: {brushColor}");
+		}
+
+		/// <summary>
+		/// Get UV coordinates at the raycast hit point using barycentric coordinates.
+		/// </summary>
+		private Vector2 GetHitUV(Mesh mesh, RaycastHit hit) {
+			if (mesh == null) return Vector2.zero;
+			
+			Vector3[] vertices = mesh.vertices;
+			Vector2[] uvs = mesh.uv;
+			int[] triangles = mesh.triangles;
+
+			// Find which triangle was hit
+			int triangleIndex = hit.triangleIndex;
+			if (triangleIndex < 0 || triangleIndex * 3 + 2 >= triangles.Length) {
+				return Vector2.zero;
+			}
+
+			int idx0 = triangles[triangleIndex * 3];
+			int idx1 = triangles[triangleIndex * 3 + 1];
+			int idx2 = triangles[triangleIndex * 3 + 2];
+
+			// Get the three UV values of the triangle
+			Vector2 uv0 = uvs.Length > idx0 ? uvs[idx0] : Vector2.zero;
+			Vector2 uv1 = uvs.Length > idx1 ? uvs[idx1] : Vector2.zero;
+			Vector2 uv2 = uvs.Length > idx2 ? uvs[idx2] : Vector2.zero;
+
+			// Get barycentric coordinates from hit (built-in Unity)
+			Vector3 baryCoords = hit.barycentricCoordinate;
+
+			// Interpolate UV using barycentric coordinates
+			Vector2 hitUV = baryCoords.x * uv0 + baryCoords.y * uv1 + baryCoords.z * uv2;
+
+			return hitUV;
+		}
+
+		/// <summary>
+		/// Create a default white texture for painting if none exists.
+		/// </summary>
+		private void CreateDefaultTexture() {
+			int textureSize = 512;
+			
+			mainTexture = new Texture2D(textureSize, textureSize, TextureFormat.RGBA32, false);
+			mainTexture.wrapMode = TextureWrapMode.Repeat;
+			mainTexture.filterMode = FilterMode.Bilinear;
+			
+			Color32[] pixels = new Color32[textureSize * textureSize];
+			
+			// Fill with white
+			for (int i = 0; i < pixels.Length; i++) {
+				pixels[i] = Color.white;
+			}
+			
+			mainTexture.SetPixels32(pixels);
+			mainTexture.Apply();
+			
+			// Initialize pixel arrays
+			backupPixels = mainTexture.GetPixels32();
+			appliedPixels = mainTexture.GetPixels32();
+			currentWorkingPixels = mainTexture.GetPixels32();
+
+			// Setup UVs for the mesh based on vertex positions
+			Mesh mesh = filter.sharedMesh;
+			EnsureUVs(mesh);
+			
+			// Apply texture to material
+			var renderer = GetComponent<MeshRenderer>();
+			if (renderer != null) {
+				renderer.material.mainTexture = mainTexture;
+			}
+		}
+
+		private void EnsureUVs(Mesh mesh) {
+			if (mesh != null && (mesh.uv == null || mesh.uv.Length == 0)) {
+				GeneratePlanarUVs(mesh);
+			}
+		}
+
+		private void GeneratePlanarUVs(Mesh mesh) {
+			if (mesh == null) return;
+			Vector3[] vertices = mesh.vertices;
+			Vector2[] uvs = new Vector2[vertices.Length];
+			Bounds bounds = mesh.bounds;
+			
+			for (int i = 0; i < vertices.Length; i++) {
+				Vector3 v = vertices[i];
+				float u = bounds.size.x > 0 ? (v.x - bounds.min.x) / bounds.size.x : 0.5f;
+				float v_coord = bounds.size.y > 0 ? (v.y - bounds.min.y) / bounds.size.y : 0.5f;
+				uvs[i] = new Vector2(Mathf.Clamp01(u), Mathf.Clamp01(v_coord));
+			}
+			mesh.uv = uvs;
+		}
+
+		private Vector2 CalculatePlanarUV(Mesh mesh, Vector3 worldPoint) {
+			if (mesh == null) return Vector2.zero;
+			Vector3 localPoint = transform.InverseTransformPoint(worldPoint);
+			Bounds bounds = mesh.bounds;
+			float u = bounds.size.x > 0 ? (localPoint.x - bounds.min.x) / bounds.size.x : 0.5f;
+			float v = bounds.size.y > 0 ? (localPoint.y - bounds.min.y) / bounds.size.y : 0.5f;
+			return new Vector2(Mathf.Clamp01(u), Mathf.Clamp01(v));
 		}
 
 	}

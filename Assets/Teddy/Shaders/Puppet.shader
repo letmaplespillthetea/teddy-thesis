@@ -59,8 +59,23 @@ Shader "Teddy/Demo/Puppet" {
 			#pragma vertex vert
 			#pragma fragment frag
 			half4 frag (v2f IN) : SV_Target {
+				// Sample the painted texture
 				half4 texColor = tex2D(_MainTex, IN.uv);
-				return texColor * _Color;
+				
+				// Calculate surface normal from screen-space derivatives (procedural)
+				float3 dx = ddx(IN.screenPos.xyz);
+				float3 dy = ddy(IN.screenPos.xyz);
+				float3 normal = normalize(cross(dx, dy));
+
+				// Toon shading calculation
+				half d = dot(normal, normalize(float3(0.5, -0.75, 0.5))) * _ToonParams.x + _ToonParams.y;
+				d = saturate(d);
+				half3 ramp = tex2D(_Ramp, float2(d, d)).rgb;
+				ramp = pow(ramp, _ToonParams.z);
+				
+				// Combine painted texture with toon shading
+				half4 finalColor = texColor * half4(ramp, 1) * _Color;
+				return finalColor;
 			}
 			ENDCG
 		}
