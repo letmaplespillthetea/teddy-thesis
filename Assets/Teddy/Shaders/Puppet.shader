@@ -3,11 +3,10 @@
 Shader "Teddy/Demo/Puppet" {
 
 	Properties {
-		[MainColor] [PerRendererData] _Color ("Color", Color) = (1, 1, 1, 1)
-		[MainTexture] [PerRendererData] _MainTex ("Main Texture", 2D) = "white" {}
+		_Color ("Color", Color) = (1, 1, 1, 1)
+		_MainTex ("Main Texture", 2D) = "white" {}
 		_Ramp ("Toon Ramp (RGB)", 2D) = "gray" {} 
 		_ToonParams ("Toon Params", Vector) = (0.47, 0.32, 1.44, -1)
-
 		_DisplacementParams ("Displacement Params", Vector) = (0.15, 0.75, 1.0, -1)
 	}
 
@@ -36,7 +35,6 @@ Shader "Teddy/Demo/Puppet" {
 
 		half4 _Color;
 		sampler2D _MainTex;
-		float4 _MainTex_ST;
 		sampler2D _Ramp;
 		half4 _ToonParams;
 		half4 _DisplacementParams;
@@ -47,7 +45,7 @@ Shader "Teddy/Demo/Puppet" {
 			v.vertex.xyz += v.normal * snoise(v.vertex.xyz * _DisplacementParams.x + float3(0, _Time.y, 0) * _DisplacementParams.y) * _DisplacementParams.z;
 			OUT.vertex = UnityObjectToClipPos(v.vertex);
 			OUT.screenPos = ComputeScreenPos(OUT.vertex);
-			OUT.uv = TRANSFORM_TEX(v.uv, _MainTex);
+			OUT.uv = v.uv;
 
 			return OUT;
 		}
@@ -60,8 +58,18 @@ Shader "Teddy/Demo/Puppet" {
 			#pragma vertex vert
 			#pragma fragment frag
 			half4 frag (v2f IN) : SV_Target {
+				float3 dx = ddx(IN.screenPos.xyz);
+				float3 dy = ddy(IN.screenPos.xyz);
+				float3 normal = normalize(cross(dx, dy));
+
 				half4 texColor = tex2D(_MainTex, IN.uv);
-				return texColor * _Color;
+
+				half d = dot(normal, normalize(float3(0.5, -0.75, 0.5))) * _ToonParams.x + _ToonParams.y;
+				d = saturate(d);
+				half3 ramp = tex2D(_Ramp, float2(d, d)).rgb;
+				ramp = pow(ramp, _ToonParams.z);
+				
+				return texColor * half4(ramp, 1) * _Color;
 			}
 			ENDCG
 		}

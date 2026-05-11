@@ -70,6 +70,7 @@ namespace mattatz.TeddySystem.Example {
 		public int animCurrentFrame = 0;
 		public int animSelectedJoint = -1;
 		public bool isRecordingAnim = false;
+		public bool isBeingPainted = false; // Flag to enable continuous collider updates
 
 		public Vector3 GetBluePointWorldPos(int bIdx) {
 			if (bIdx < 0 || bIdx >= bluePoints.Count) return Vector3.zero;
@@ -111,6 +112,7 @@ namespace mattatz.TeddySystem.Example {
 				
 				float v = (d11 * d20 - d01 * d21) / denom;
 				float w = (d00 * d21 - d01 * d20) / denom;
+
 				float u = 1.0f - v - w;
 				
 				if (u >= -0.01f && v >= -0.01f && w >= -0.01f) {
@@ -269,7 +271,9 @@ namespace mattatz.TeddySystem.Example {
 			MaterialPropertyBlock block = new MaterialPropertyBlock();
 			rnd.GetPropertyBlock(block);
 			
-			puppetColor = (colors != null && colors.Count > 0) ? colors[Random.Range(0, colors.Count)] : Color.white;
+			// Set default color to white for new meshes
+			puppetColor = Color.white;
+
 			
 			// Only set color if the shader has a _Color property
 			if (rnd.sharedMaterial != null && rnd.sharedMaterial.HasProperty("_Color")) {
@@ -483,6 +487,13 @@ namespace mattatz.TeddySystem.Example {
 				mesh.vertices = skinning.Deform(skeletonBones);
 				mesh.RecalculateNormals();
 				mesh.RecalculateBounds();
+
+				// Update collider if we are currently drawing on the surface 
+				// (needed for accurate hits on deformed mesh)
+				if (isBeingPainted) {
+					col.sharedMesh = null;
+					col.sharedMesh = mesh;
+				}
 			} else {
 				for(int i=0; i<joints.Count; i++) {
 					if (i != draggingJoint) worldJoints[i] = transform.TransformPoint(restLocalPositions[i]);
@@ -1222,6 +1233,171 @@ namespace mattatz.TeddySystem.Example {
 				GL.Vertex3(cx + Mathf.Cos(a0) * r, cy + Mathf.Sin(a0) * r, 0f);
 				GL.Vertex3(cx + Mathf.Cos(a1) * r, cy + Mathf.Sin(a1) * r, 0f);
 			}
+		}
+
+		// --- Surface Painting Logic ---
+
+		private void CreateDefaultTexture() {
+			int res = 512;
+			mainTexture = new Texture2D(res, res, TextureFormat.RGBA32, false);
+			
+			// Fill with white as default
+			Color32[] pixels = new Color32[res * res];
+			for (int i = 0; i < pixels.Length; i++) pixels[i] = Color.white;
+
+			mainTexture.SetPixels32(pixels);
+			mainTexture.Apply();
+
+			backupPixels = mainTexture.GetPixels32();
+			appliedPixels = mainTexture.GetPixels32();
+			currentWorkingPixels = mainTexture.GetPixels32();
+
+			EnsureUVs(filter.sharedMesh);
+			
+			var renderer = GetComponent<MeshRenderer>();
+			if (renderer != null) {
+				renderer.material.mainTexture = mainTexture;
+			}
+		}
+
+		public void PaintOnSurface(RaycastHit hit, Color32 brushColor, float brushSize) {
+			if (mainTexture == null) {
+				CreateDefaultTexture();
+			}
+
+			Mesh mesh = filter.sharedMesh;
+			EnsureUVs(mesh);
+
+			// Get UV coordinates at hit point
+			Vector2 hitUV = GetHitUV(mesh, hit);
+			// Fallback: if mesh UVs are missing or zero, use planar projection from local space
+			if (hitUV.sqrMagnitude < 1e-6f) {
+				hitUV = CalculatePlanarUV(mesh, hit.point);
+			}
+
+			int w = mainTexture.width;
+			int h = mainTexture.height;
+			int centerX = Mathf.FloorToInt(hitUV.x * w);
+			int centerY = Mathf.FloorToInt(hitUV.y * h);
+			int radius = Mathf.CeilToInt(brushSize);
+
+			bool changed = false;
+			for (int y = -radius; y <= radius; y++) {
+				for (int x = -radius; x <= radius; x++) {
+					if (x * x + y * y <= radius * radius) {
+						int px = centerX + x;
+						int py = centerY + y;
+						if (px >= 0 && px < w && py >= 0 && py < h) {
+							int idx = py * w + px;
+							appliedPixels[idx] = brushColor;
+							currentWorkingPixels[idx] = brushColor;
+							changed = true;
+						}
+					}
+				}
+			}
+
+			if (changed) {
+				mainTexture.SetPixels32(appliedPixels);
+				mainTexture.Apply();
+
+				// Force update the material property block
+				var renderer = GetComponent<MeshRenderer>();
+				MaterialPropertyBlock block = new MaterialPropertyBlock();
+				renderer.GetPropertyBlock(block);
+				block.SetTexture("_MainTex", mainTexture);
+				renderer.SetPropertyBlock(block);
+				
+				Debug.Log($"[Puppet] Painted at UV ({hitUV.x:F3}, {hitUV.y:F3}), Color: {brushColor}");
+			}
+		}
+
+		public void ClearSurfacePaint() {
+			if (mainTexture == null) return;
+			
+			Color32[] pixels = new Color32[mainTexture.width * mainTexture.height];
+			for (int i = 0; i < pixels.Length; i++) pixels[i] = Color.white;
+			
+			mainTexture.SetPixels32(pixels);
+			mainTexture.Apply();
+
+			// Sync arrays
+			backupPixels = mainTexture.GetPixels32();
+			appliedPixels = mainTexture.GetPixels32();
+			currentWorkingPixels = mainTexture.GetPixels32();
+
+			// Update renderer
+			var renderer = GetComponent<MeshRenderer>();
+			MaterialPropertyBlock block = new MaterialPropertyBlock();
+			renderer.GetPropertyBlock(block);
+			block.SetTexture("_MainTex", mainTexture);
+			renderer.SetPropertyBlock(block);
+			
+			Debug.Log("[Puppet] Surface paint cleared.");
+		}
+
+		private Vector2 GetHitUV(Mesh mesh, RaycastHit hit) {
+			if (mesh == null || mesh.uv == null || mesh.uv.Length == 0) return Vector2.zero;
+			
+			int[] triangles = mesh.triangles;
+			Vector2[] uvs = mesh.uv;
+			int triangleIndex = hit.triangleIndex;
+
+			if (triangleIndex < 0 || triangleIndex * 3 + 2 >= triangles.Length) return Vector2.zero;
+
+			int i0 = triangles[triangleIndex * 3];
+			int i1 = triangles[triangleIndex * 3 + 1];
+			int i2 = triangles[triangleIndex * 3 + 2];
+
+			Vector3 bary = hit.barycentricCoordinate;
+			Vector2 uv = uvs[i0] * bary.x + uvs[i1] * bary.y + uvs[i2] * bary.z;
+			return uv;
+		}
+
+		private void EnsureUVs(Mesh mesh) {
+			if (mesh == null) return;
+			
+			bool needsUVs = false;
+			if (mesh.uv == null || mesh.uv.Length == 0) {
+				needsUVs = true;
+			} else {
+				// Check if UVs are essentially all zero (common in procedurally generated meshes)
+				needsUVs = true;
+				for (int i = 0; i < Mathf.Min(mesh.uv.Length, 50); i++) {
+					if (mesh.uv[i].sqrMagnitude > 1e-6f) {
+						needsUVs = false;
+						break;
+					}
+				}
+			}
+
+			if (needsUVs) {
+				GeneratePlanarUVs(mesh);
+			}
+		}
+
+		private void GeneratePlanarUVs(Mesh mesh) {
+			if (mesh == null) return;
+			Vector3[] vertices = mesh.vertices;
+			Vector2[] uvs = new Vector2[vertices.Length];
+			Bounds bounds = mesh.bounds;
+			
+			for (int i = 0; i < vertices.Length; i++) {
+				Vector3 v = vertices[i];
+				float u = bounds.size.x > 0 ? (v.x - bounds.min.x) / bounds.size.x : 0.5f;
+				float v_coord = bounds.size.y > 0 ? (v.y - bounds.min.y) / bounds.size.y : 0.5f;
+				uvs[i] = new Vector2(Mathf.Clamp01(u), Mathf.Clamp01(v_coord));
+			}
+			mesh.uv = uvs;
+		}
+
+		private Vector2 CalculatePlanarUV(Mesh mesh, Vector3 worldPoint) {
+			if (mesh == null) return Vector2.zero;
+			Vector3 localPoint = transform.InverseTransformPoint(worldPoint);
+			Bounds bounds = mesh.bounds;
+			float u = bounds.size.x > 0 ? (localPoint.x - bounds.min.x) / bounds.size.x : 0.5f;
+			float v = bounds.size.y > 0 ? (localPoint.y - bounds.min.y) / bounds.size.y : 0.5f;
+			return new Vector2(Mathf.Clamp01(u), Mathf.Clamp01(v));
 		}
 
 	}
