@@ -96,6 +96,11 @@ namespace mattatz.TeddySystem.Example {
 		float    regionEditStiffness = 0.2f;
 		float    regionEditDamping   = 0.1f;
 
+		// Bresenham sketch overlay
+		Texture2D sketchOverlayTex;
+		Color32[] sketchPixels;
+		bool sketchTextureDirty = true;
+
 		struct SketchSnapshot {
 			public List<Vector2> pts;
 			public List<List<Vector2>> contours;
@@ -365,6 +370,7 @@ namespace mattatz.TeddySystem.Example {
 								PushUndoState(); // Save state before starting to draw
 								// Clear(); // Don't clear multiPartContours here, just the current points
 								points.Clear();
+								sketchTextureDirty = true;
 								mode = OperationMode.Draw;
 							}
 						}
@@ -379,6 +385,7 @@ namespace mattatz.TeddySystem.Example {
 						mode = OperationMode.WaitingForInflation;
 					} else {
 						points.Clear();
+						sketchTextureDirty = true;
 						mode = OperationMode.Default;
 					}
 				} else {
@@ -387,6 +394,7 @@ namespace mattatz.TeddySystem.Example {
 					var p2D = new Vector2(p.x, p.y);
 					if(points.Count <= 0 || Vector2.Distance(p2D, points.Last()) > threshold) {
 						points.Add(p2D);
+						sketchTextureDirty = true;
 					}
 				}
 				break;
@@ -396,6 +404,7 @@ namespace mattatz.TeddySystem.Example {
 					// If clicking background while waiting, start a new drawing
 					PushUndoState(); // Save state before starting to draw
 					points.Clear();
+					sketchTextureDirty = true;
 					mode = OperationMode.Draw;
 				}
 				break;
@@ -550,6 +559,10 @@ namespace mattatz.TeddySystem.Example {
 							newMultiParts.AddRange(segments);
 						}
 						if (modified) multiPartContours = newMultiParts;
+					}
+
+					if (modified) {
+						sketchTextureDirty = true;
 					}
 				}
 				break;
@@ -910,48 +923,22 @@ void BuildWithDomainStitching () {
 
 		Debug.Log($"[ExtractOuterContour] Bounds: ({minX:F2}, {minY:F2}) to ({maxX:F2}, {maxY:F2})");
 
-		// 2. Setup Rasterization with higher resolution
-		int res = 1024; // Increased from 512 for better quality
-		RenderTexture rt = RenderTexture.GetTemporary(res, res, 0, RenderTextureFormat.Default);
-		RenderTexture.active = rt;
-		GL.Clear(true, true, Color.clear);
+		// 2. Setup CPU Rasterization using Bresenham's line algorithm
+		int res = 1024;
+		Color32[] pixels = new Color32[res * res];
+		Color32 white = new Color32(255, 255, 255, 255);
 
-		// Use a simple material to draw filled polygons
-		Material mat = new Material(Shader.Find("Hidden/Internal-Colored"));
-		mat.SetPass(0);
-
-		GL.PushMatrix();
-		GL.LoadPixelMatrix(0, res, 0, res);
-		GL.Begin(GL.TRIANGLES);
-		GL.Color(Color.white);
-
-		// Rasterize all contours
-		int triangleCount = 0;
+		// Rasterize all contours as outlines on CPU
 		foreach (var c in contours) {
-			try {
-				var polygon = Polygon2D.Contour(c.ToArray());
-				var triangulation = new Triangulation2D(polygon, 0f);
-				foreach (var t in triangulation.Triangles) {
-					Vector2 p0 = MapToRT(t.a.Coordinate, minX, minY, width, height, res);
-					Vector2 p1 = MapToRT(t.b.Coordinate, minX, minY, width, height, res);
-					Vector2 p2 = MapToRT(t.c.Coordinate, minX, minY, width, height, res);
-					GL.Vertex3(p0.x, p0.y, 0);
-					GL.Vertex3(p1.x, p1.y, 0);
-					GL.Vertex3(p2.x, p2.y, 0);
-					triangleCount++;
-				}
-			} catch (System.Exception ex) {
-				Debug.LogWarning($"[ExtractOuterContour] Failed to triangulate contour: {ex.Message}");
+			for (int i = 0; i < c.Count; i++) {
+				Vector2 p0 = MapToRT(c[i], minX, minY, width, height, res);
+				Vector2 p1 = MapToRT(c[(i + 1) % c.Count], minX, minY, width, height, res);
+				DrawLineBresenham(pixels, res, res, p0, p1, white, 5); // 5px thickness for clean Moore tracing
 			}
 		}
-		GL.End();
-		GL.PopMatrix();
 
-		Debug.Log($"[ExtractOuterContour] Rasterized {triangleCount} triangles");
-
-		// 3. Read pixels and extract contour
 		Texture2D tex = new Texture2D(res, res, TextureFormat.RGBA32, false);
-		tex.ReadPixels(new Rect(0, 0, res, res), 0, 0);
+		tex.SetPixels32(pixels);
 		tex.Apply();
 
 		var rawContour = TextureContourExtractor.ExtractContour(tex);
@@ -981,10 +968,7 @@ void BuildWithDomainStitching () {
 		Debug.Log($"[ExtractOuterContour] Final: {result.Count} points");
 
 		// Cleanup
-		RenderTexture.active = null;
-		RenderTexture.ReleaseTemporary(rt);
 		Destroy(tex);
-		Destroy(mat);
 
 		return result;
 	}
@@ -1017,11 +1001,13 @@ void BuildWithDomainStitching () {
 
 		void Clear () {
 			points.Clear();
+			sketchTextureDirty = true;
 		}
 
 		void ClearAll() {
 			points.Clear();
 			multiPartContours.Clear();
+			sketchTextureDirty = true;
 		}
 
 		public void Save () {
@@ -1038,6 +1024,7 @@ void BuildWithDomainStitching () {
 				points.Clear();
 				multiPartContours.Clear();
 				mode = OperationMode.Default;
+				sketchTextureDirty = true;
 				return;
 			}
 			var state = undoStack[undoStack.Count - 1];
@@ -1045,6 +1032,7 @@ void BuildWithDomainStitching () {
 			points = state.pts;
 			multiPartContours = state.contours;
 			mode = state.opMode;
+			sketchTextureDirty = true;
 		}
 
 		public void Reset () {
@@ -1108,30 +1096,7 @@ void BuildWithDomainStitching () {
 				GL.End();
 			}
 
-			if(points != null) {
-				GL.PushMatrix();
-				GL.MultMatrix (transform.localToWorldMatrix);
-				lineMat.SetColor("_Color", Color.black);
-				lineMat.SetPass(0);
-				GL.Begin(GL.LINES);
-				for(int i = 0, n = points.Count - 1; i < n; i++) {
-					GL.Vertex(points[i]); GL.Vertex(points[i + 1]);
-				}
-				GL.End();
-				
-				// Draw accumulated parts
-				lineMat.SetColor("_Color", new Color(0f, 0f, 0f, 0.4f));
-				lineMat.SetPass(0);
-				GL.Begin(GL.LINES);
-				foreach (var contour in multiPartContours) {
-					for (int i = 0, n = contour.Count - 1; i < n; i++) {
-						GL.Vertex(contour[i]); GL.Vertex(contour[i + 1]);
-					}
-				}
-				GL.End();
-				
-				GL.PopMatrix();
-			}
+			// Sketch GL vector lines replaced with CPU Bresenham texture overlay in OnGUI
 
 			// Draw lasso outline in screen space
 			if (mode == OperationMode.LassoJoint && lassoPoints != null && lassoPoints.Count > 1) {
@@ -1159,6 +1124,16 @@ void BuildWithDomainStitching () {
 		}
 
 		void OnGUI() {
+			if ((points != null && points.Count > 0) || multiPartContours.Count > 0) {
+				RenderSketchWithBresenham();
+				if (sketchOverlayTex != null) {
+					var prevGUIColor = GUI.color;
+					GUI.color = Color.white;
+					GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), sketchOverlayTex);
+					GUI.color = prevGUIColor;
+				}
+			}
+
 			Color _bg = GUI.backgroundColor;
 			// Set global button background to dark grey/black matching the reference
 			GUI.backgroundColor = new Color(0.18f, 0.18f, 0.18f, 1f);
@@ -1246,9 +1221,7 @@ void BuildWithDomainStitching () {
 			GUI.backgroundColor = new Color(0.8f, 0.3f, 0.3f);
 			if (GUI.Button(new Rect(15, 185, 125, 24), "XX Clear Sketch", style)) {
 				PushUndoState();
-				points.Clear();
-				if (multiPartContours.Count == 0) mode = OperationMode.Default;
-				else mode = OperationMode.WaitingForInflation;
+				ClearAll();
 			}
 			GUI.backgroundColor = new Color(0.18f, 0.18f, 0.18f, 1f);
 
@@ -1533,40 +1506,21 @@ void BuildWithDomainStitching () {
 			minX -= margin; minY -= margin; maxX += margin; maxY += margin;
 			width = maxX - minX; height = maxY - minY;
 
-			// 2. Setup Rasterization
+			// 2. Setup CPU Rasterization using Bresenham's line algorithm
 			int res = 512;
-			RenderTexture rt = RenderTexture.GetTemporary(res, res, 0, RenderTextureFormat.Default);
-			RenderTexture.active = rt;
-			GL.Clear(true, true, Color.clear);
-
-			// Use a simple material to draw filled polygons
-			Material mat = new Material(Shader.Find("Hidden/Internal-Colored"));
-			mat.SetPass(0);
-
-			GL.PushMatrix();
-			GL.LoadPixelMatrix(0, res, 0, res); // Map to RT pixels
-			GL.Begin(GL.TRIANGLES);
-			GL.Color(Color.white);
+			Color32[] pixels = new Color32[res * res];
+			Color32 white = new Color32(255, 255, 255, 255);
 
 			foreach (var c in contours) {
-				// Simple triangulation for concave polygons (Teddy's triangulation is better but this is for raster)
-				var polygon = Polygon2D.Contour(c.ToArray());
-				var triangulation = new Triangulation2D(polygon, 0f);
-				foreach (var t in triangulation.Triangles) {
-					Vector2 p0 = MapToRT(t.a.Coordinate, minX, minY, width, height, res);
-					Vector2 p1 = MapToRT(t.b.Coordinate, minX, minY, width, height, res);
-					Vector2 p2 = MapToRT(t.c.Coordinate, minX, minY, width, height, res);
-					GL.Vertex3(p0.x, p0.y, 0);
-					GL.Vertex3(p1.x, p1.y, 0);
-					GL.Vertex3(p2.x, p2.y, 0);
+				for (int i = 0; i < c.Count; i++) {
+					Vector2 p0 = MapToRT(c[i], minX, minY, width, height, res);
+					Vector2 p1 = MapToRT(c[(i + 1) % c.Count], minX, minY, width, height, res);
+					DrawLineBresenham(pixels, res, res, p0, p1, white, 5);
 				}
 			}
-			GL.End();
-			GL.PopMatrix();
 
-			// 3. Read pixels and extract contour
 			Texture2D tex = new Texture2D(res, res, TextureFormat.RGBA32, false);
-			tex.ReadPixels(new Rect(0, 0, res, res), 0, 0);
+			tex.SetPixels32(pixels);
 			tex.Apply();
 
 			var rawContour = TextureContourExtractor.ExtractContour(tex);
@@ -1587,10 +1541,7 @@ void BuildWithDomainStitching () {
 			refinedResult = SketchCleaner.Smooth(refinedResult, 3);
 			refinedResult = SketchCleaner.EnsureClosure(refinedResult, threshold);
 
-			RenderTexture.active = null;
-			RenderTexture.ReleaseTemporary(rt);
 			Destroy(tex);
-			Destroy(mat);
 
 			// 6. Set as the current active sketch (Auto-pass logic)
 			points = refinedResult;
@@ -1641,6 +1592,96 @@ void BuildWithDomainStitching () {
 			headerStyle.alignment = TextAnchor.UpperCenter;
 			headerStyle.normal.textColor = Color.white;
 			GUI.Label(new Rect(rect.x, rect.y + 5, rect.width, 20), title, headerStyle);
+		}
+
+		void DrawLineBresenham(Color32[] pixels, int w, int h, Vector2 p0, Vector2 p1, Color32 color, int thickness = 5) {
+			int x0 = Mathf.RoundToInt(p0.x);
+			int y0 = Mathf.RoundToInt(p0.y);
+			int x1 = Mathf.RoundToInt(p1.x);
+			int y1 = Mathf.RoundToInt(p1.y);
+
+			int dx = Mathf.Abs(x1 - x0);
+			int dy = Mathf.Abs(y1 - y0);
+			int sx = x0 < x1 ? 1 : -1;
+			int sy = y0 < y1 ? 1 : -1;
+			int err = dx - dy;
+
+			while (true) {
+				for (int ty = -thickness / 2; ty <= thickness / 2; ty++) {
+					for (int tx = -thickness / 2; tx <= thickness / 2; tx++) {
+						int px = x0 + tx;
+						int py = y0 + ty;
+						if (px >= 0 && px < w && py >= 0 && py < h) {
+							pixels[py * w + px] = color;
+						}
+					}
+				}
+
+				if (x0 == x1 && y0 == y1) break;
+				int e2 = 2 * err;
+				if (e2 > -dy) {
+					err -= dy;
+					x0 += sx;
+				}
+				if (e2 < dx) {
+					err += dx;
+					y0 += sy;
+				}
+			}
+		}
+
+		void RenderSketchWithBresenham() {
+			int w = Screen.width;
+			int h = Screen.height;
+			
+			if (sketchOverlayTex == null || sketchOverlayTex.width != w || sketchOverlayTex.height != h) {
+				if (sketchOverlayTex != null) {
+					Destroy(sketchOverlayTex);
+				}
+				sketchOverlayTex = new Texture2D(w, h, TextureFormat.RGBA32, false);
+				sketchPixels = new Color32[w * h];
+				sketchTextureDirty = true;
+			}
+
+			if (sketchTextureDirty) {
+				System.Array.Clear(sketchPixels, 0, sketchPixels.Length);
+
+				Color32 strokeColor = new Color32(0, 0, 0, 255); // Black for active sketch
+				Color32 accumColor = new Color32(0, 0, 0, 102);  // Semi-transparent black (0.4f alpha) for accumulated sketches
+
+				// 1. Draw accumulated multipart contours
+				foreach (var contour in multiPartContours) {
+					if (contour.Count < 2) continue;
+					for (int i = 0; i < contour.Count - 1; i++) {
+						Vector3 w0 = transform.TransformPoint(contour[i]);
+						Vector3 w1 = transform.TransformPoint(contour[i + 1]);
+						Vector3 s0 = cam.WorldToScreenPoint(w0);
+						Vector3 s1 = cam.WorldToScreenPoint(w1);
+						DrawLineBresenham(sketchPixels, w, h, s0, s1, accumColor, 4);
+					}
+				}
+
+				// 2. Draw current active points
+				if (points != null && points.Count > 1) {
+					for (int i = 0; i < points.Count - 1; i++) {
+						Vector3 w0 = transform.TransformPoint(points[i]);
+						Vector3 w1 = transform.TransformPoint(points[i + 1]);
+						Vector3 s0 = cam.WorldToScreenPoint(w0);
+						Vector3 s1 = cam.WorldToScreenPoint(w1);
+						DrawLineBresenham(sketchPixels, w, h, s0, s1, strokeColor, 4);
+					}
+				}
+
+				sketchOverlayTex.SetPixels32(sketchPixels);
+				sketchOverlayTex.Apply();
+				sketchTextureDirty = false;
+			}
+		}
+
+		void OnDestroy() {
+			if (sketchOverlayTex != null) {
+				Destroy(sketchOverlayTex);
+			}
 		}
 
 		void DrawColorEditor(GUIStyle style) {
