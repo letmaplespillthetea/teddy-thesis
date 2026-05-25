@@ -29,7 +29,7 @@ Shader "Teddy/Demo/Puppet" {
 
 		struct v2f {
 			float4 vertex : SV_POSITION;
-			float3 screenPos : TANGENT;
+			float3 normal : TEXCOORD1;
 			float2 uv : TEXCOORD0;
 		};
 
@@ -44,7 +44,7 @@ Shader "Teddy/Demo/Puppet" {
 
 			v.vertex.xyz += v.normal * snoise(v.vertex.xyz * _DisplacementParams.x + float3(0, _Time.y, 0) * _DisplacementParams.y) * _DisplacementParams.z;
 			OUT.vertex = UnityObjectToClipPos(v.vertex);
-			OUT.screenPos = ComputeScreenPos(OUT.vertex);
+			OUT.normal = UnityObjectToWorldNormal(v.normal);
 			OUT.uv = v.uv;
 
 			return OUT;
@@ -57,20 +57,27 @@ Shader "Teddy/Demo/Puppet" {
 			CGPROGRAM
 			#pragma vertex vert
 			#pragma fragment frag
+			#include "Lighting.cginc"
+			
 			half4 frag (v2f IN) : SV_Target {
-				float3 dx = ddx(IN.screenPos.xyz);
-				float3 dy = ddy(IN.screenPos.xyz);
-				float3 normal = normalize(cross(dx, dy));
-
+				float3 normal = normalize(IN.normal);
 				half4 texColor = tex2D(_MainTex, IN.uv);
 
-				half d = dot(normal, normalize(float3(0.5, -0.75, 0.5))) * _ToonParams.x + _ToonParams.y;
+				// Light direction in world space
+				float3 lightDir = normalize(_WorldSpaceLightPos0.xyz);
+
+				// Toon diffuse term
+				half d = dot(normal, lightDir) * _ToonParams.x + _ToonParams.y;
 				d = saturate(d);
+				
 				half3 ramp = tex2D(_Ramp, float2(d, d)).rgb;
 				ramp = pow(ramp, _ToonParams.z);
-				ramp = max(ramp, half3(0.85, 0.85, 0.85)); // Ambient floor to keep it bright and colorful
 				
-				return texColor * half4(ramp, 1) * _Color;
+				// Standard ambient light estimation to prevent pure black in shadows
+				half3 ambient = max(ShadeSH9(half4(normal, 1)), half3(0.4, 0.4, 0.4));
+				half3 shading = ambient + ramp * _LightColor0.rgb;
+				
+				return texColor * half4(shading, 1) * _Color;
 			}
 			ENDCG
 		}

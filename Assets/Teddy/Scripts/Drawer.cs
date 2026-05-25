@@ -67,7 +67,6 @@ namespace mattatz.TeddySystem.Example {
 		// Domain Stitching System
 		DomainStitchingSystem stitchingSystem;
 		List<List<Vector2>> multiPartContours = new List<List<Vector2>>();  // Accumulated sketches for refinement/stitching
-		SketchCollection sketchCollection = new SketchCollection();          // Phase 2: Individual sketch info
 
 		Camera cam;
 		float screenZ = 0f;
@@ -678,67 +677,7 @@ namespace mattatz.TeddySystem.Example {
 			BuildTraditional();
 		}
 
-		// Save current session sketches to collection before clearing
-		foreach (var contour in multiPartContours) {
-			sketchCollection.AddSketch(contour);
-		}
-		if (points.Count > 3) {
-			sketchCollection.AddSketch(new List<Vector2>(points));
-		}
-
-		// Print 4 sample points for legs as requested
-		var savedAppendages = sketchCollection.GetAppendages();
-		foreach (var app in savedAppendages) {
-			string samples = "";
-			for (int j = 0; j < Mathf.Min(4, app.contour.Count); j++) {
-				samples += $"({app.contour[j].x:F3}, {app.contour[j].y:F3}) ";
-			}
-			Debug.Log($"[Drawer] Leg Sketch Sample Points (XY): {samples}");
-		}
-
-		// Post-process: Push appendages (legs/arms) forward in Z
-		if (activePuppet != null) {
-			PushAppendagesForward(activePuppet, sketchCollection);
-		}
-
 		ClearAll();
-	}
-
-	/// <summary>
-	/// Offsets the Z position of mesh vertices that belong to appendage sketches.
-	/// This pushes limbs (legs, arms) forward for better depth layering.
-	/// </summary>
-	void PushAppendagesForward(Puppet puppet, SketchCollection collection) {
-		var appendages = collection.GetAppendages();
-		if (appendages.Count == 0) return;
-
-		MeshFilter mf = puppet.GetComponent<MeshFilter>();
-		if (mf == null || mf.sharedMesh == null) return;
-
-		Mesh mesh = mf.sharedMesh;
-		Vector3[] vertices = mesh.vertices;
-		float zOffset = 0.4f; // Push forward amount
-
-		bool modified = false;
-		foreach (var app in appendages) {
-			for (int i = 0; i < vertices.Length; i++) {
-				Vector2 p2D = new Vector2(vertices[i].x, vertices[i].y);
-				if (IsPointInPolygon(p2D, app.contour)) {
-					vertices[i].z += zOffset;
-					modified = true;
-				}
-			}
-		}
-
-		if (modified) {
-			mesh.vertices = vertices;
-			mesh.RecalculateNormals();
-			mesh.RecalculateBounds();
-			
-			// Update collider if it exists
-			MeshCollider mc = puppet.GetComponent<MeshCollider>();
-			if (mc != null) mc.sharedMesh = mesh;
-		}
 	}
 
 	/// <summary>
@@ -1083,14 +1022,6 @@ void BuildWithDomainStitching () {
 		void ClearAll() {
 			points.Clear();
 			multiPartContours.Clear();
-			// Keep only appendages for later display
-			if (sketchCollection != null) {
-				var appendages = sketchCollection.GetAppendages();
-				sketchCollection.Clear();
-				foreach (var app in appendages) {
-					sketchCollection.sketches.Add(app);
-				}
-			}
 		}
 
 		public void Save () {
@@ -1195,17 +1126,6 @@ void BuildWithDomainStitching () {
 				foreach (var contour in multiPartContours) {
 					for (int i = 0, n = contour.Count - 1; i < n; i++) {
 						GL.Vertex(contour[i]); GL.Vertex(contour[i + 1]);
-					}
-				}
-				GL.End();
-
-				// Draw saved appendages from previous builds
-				lineMat.SetColor("_Color", new Color(0.2f, 0.8f, 1f, 0.6f)); // Light blue for saved appendages
-				lineMat.SetPass(0);
-				GL.Begin(GL.LINES);
-				foreach (var sketch in sketchCollection.GetAppendages()) {
-					for (int i = 0, n = sketch.contour.Count - 1; i < n; i++) {
-						GL.Vertex(sketch.contour[i]); GL.Vertex(sketch.contour[i + 1]);
 					}
 				}
 				GL.End();
