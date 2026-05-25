@@ -23,7 +23,8 @@ namespace mattatz.TeddySystem.Example {
 		MoveJoint,
 		LassoJoint,
 		WaitingForInflation,
-		DrawOnSurface
+		DrawOnSurface,
+		Erase
 	};
 
 	public class Drawer : MonoBehaviour {
@@ -43,7 +44,10 @@ namespace mattatz.TeddySystem.Example {
 		[Header("Mass Spring Physics")]
 		[SerializeField] bool enableGravity = false;
 		[SerializeField] bool enablePhysics = true;
-		[SerializeField, Range(0f, 1f)] float shapeStiffness = 0.2f;
+		[SerializeField, Tooltip("Old shape-matching stiffness (kept for compatibility, unused by Fast MS solver)"), Range(0f, 1f)]
+		float shapeStiffness = 0.2f;
+		[SerializeField, Tooltip("Spring stiffness k for Fast Mass-Spring solver.\nEffective = h²·k (h=1/60). Try 1000–50000.")]
+		float springStiffness = 5000f;
 		[SerializeField, Range(0f, 1f)] float damping = 0.1f;
 
 		[SerializeField, Range(0.1f, 2f)] float inflationAmount = 1.0f;
@@ -98,6 +102,31 @@ namespace mattatz.TeddySystem.Example {
 		
 		// --- Animation Mode ---
 		public bool isAnimationMode = false;
+<<<<<<< Updated upstream
+=======
+		[Header("Animation Path Settings")]
+		[SerializeField] Color animPathColor = new Color(0.6f, 0.6f, 0.6f, 0.4f);
+		[SerializeField] Color animBluePathColor = new Color(0.4f, 0.4f, 0.8f, 0.4f);
+		[SerializeField, Range(0.05f, 5f)] float animPathBrushSize = 0.5f;
+		
+		// --- Color History ---
+		List<Color> colorHistory = new List<Color>();
+		void AddColorToHistory(Color c) {
+			// Don't add gray/white defaults if they are too generic? No, user wants applied colors.
+			// Remove if already exists to move it to front
+			for(int i = 0; i < colorHistory.Count; i++) {
+				if (ColorEquals(colorHistory[i], c)) {
+					colorHistory.RemoveAt(i);
+					break;
+				}
+			}
+			colorHistory.Insert(0, c);
+			if (colorHistory.Count > 6) colorHistory.RemoveAt(6);
+		}
+		bool ColorEquals(Color a, Color b) {
+			return Mathf.Abs(a.r-b.r) < 0.001f && Mathf.Abs(a.g-b.g) < 0.001f && Mathf.Abs(a.b-b.b) < 0.001f;
+		}
+>>>>>>> Stashed changes
 		public bool isAnimDragValid = false;
 
 		Texture2D colorWheel;
@@ -176,7 +205,15 @@ namespace mattatz.TeddySystem.Example {
 				p.jointRadius = jointRadius;
 				p.enablePhysics = enablePhysics;
 				p.shapeStiffness = shapeStiffness;
+				p.springStiffness = springStiffness;  // Fast Mass-Spring stiffness
 				p.damping = damping;
+<<<<<<< Updated upstream
+=======
+				p.showMeshWireframe = showMeshWireframe;
+				p.animPathColor = animPathColor;
+				p.animBluePathColor = animBluePathColor;
+				p.animPathBrushSize = animPathBrushSize;
+>>>>>>> Stashed changes
 			}
 
 			var bottom = cam.ViewportToWorldPoint(new Vector3(0.5f, 0f, screenZ));
@@ -187,10 +224,24 @@ namespace mattatz.TeddySystem.Example {
 
 			Vector2 guiMouse = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
 			// Area for the new UI controls
+<<<<<<< Updated upstream
 			bool isOverLeftUI  = new Rect(10, 10, 200, 350).Contains(guiMouse);
 			// Right panel: buttons + region panel (220 × 320 when region panel is visible)
 			bool isOverRightUI = new Rect(Screen.width - 220, 10, 220,
 				isEditMode ? 400 : (showRegionPanel ? 320 : 280)).Contains(guiMouse);
+=======
+			bool isOverLeftUI  = new Rect(10, 10, 200, 500).Contains(guiMouse);
+			
+			// Right panel: dynamically calculate height based on active panels
+			float rightPanelHeight = 270; // Base (Mesh Gen + Interaction Modes)
+			if (isEditMode || mode == OperationMode.DrawOnSurface) rightPanelHeight += 400;
+			else if (isRigEditMode) rightPanelHeight += 150;
+			else if (isAnimationMode) rightPanelHeight += 200;
+			if (showRegionPanel) rightPanelHeight += 130;
+
+			// Right UI Area for blocking clicks
+			bool isOverRightUI = new Rect(Screen.width - 220, 0, 220, Screen.height).Contains(guiMouse);
+>>>>>>> Stashed changes
 			
 			// Inflation buttons in center bottom
 			bool isOverCenterUI = false;
@@ -246,9 +297,10 @@ namespace mattatz.TeddySystem.Example {
 							}
 						} else if (!isLassoMode) {
 							// Only allow sketch-drawing when enabled AND lasso is NOT armed
-							if (isDrawingEnabled && !isAnimationMode) {
+							if (isDrawingEnabled && !isAnimationMode && mode != OperationMode.Erase) {
 								activePuppet = null;
 								isEditMode = false;
+								PushUndoState(); // Save state before starting to draw
 								// Clear(); // Don't clear multiPartContours here, just the current points
 								points.Clear();
 								mode = OperationMode.Draw;
@@ -280,7 +332,7 @@ namespace mattatz.TeddySystem.Example {
 			case OperationMode.WaitingForInflation:
 				if(Input.GetMouseButtonDown(0) && !isOverUI) {
 					// If clicking background while waiting, start a new drawing
-					// Clear(); 
+					PushUndoState(); // Save state before starting to draw
 					points.Clear();
 					mode = OperationMode.Draw;
 				}
@@ -406,6 +458,37 @@ namespace mattatz.TeddySystem.Example {
 					isSurfaceDrawing = false;
 					surfaceDrawingTarget = null;
 					Debug.Log("[DrawSurface] Stopped painting");
+				}
+				break;
+
+			case OperationMode.Erase:
+				if (Input.GetMouseButtonDown(0) && !isOverUI) {
+					PushUndoState();
+				} else if (Input.GetMouseButton(0) && !isOverUI) {
+					var p = cam.ScreenToWorldPoint(screen);
+					p = transform.InverseTransformPoint(p);
+					var p2D = new Vector2(p.x, p.y);
+					float eraserRadius = 0.5f;
+					bool modified = false;
+
+					if (points != null && points.Count > 0) {
+						var newParts = SplitContourByEraser(points, p2D, eraserRadius, ref modified);
+						if (newParts.Count > 0) {
+							points = newParts[newParts.Count - 1];
+							for(int i = 0; i < newParts.Count - 1; i++) multiPartContours.Add(newParts[i]);
+						} else if (modified) {
+							points.Clear();
+						}
+					}
+
+					if (multiPartContours != null && multiPartContours.Count > 0) {
+						List<List<Vector2>> newMultiParts = new List<List<Vector2>>();
+						for(int c = 0; c < multiPartContours.Count; c++) {
+							var segments = SplitContourByEraser(multiPartContours[c], p2D, eraserRadius, ref modified);
+							newMultiParts.AddRange(segments);
+						}
+						if (modified) multiPartContours = newMultiParts;
+					}
 				}
 				break;
 
@@ -951,12 +1034,35 @@ void BuildWithDomainStitching () {
 			LocalStorage.SaveList<Vector2>(points, "points.json");
 		}
 
+<<<<<<< Updated upstream
+=======
+		void PushUndoState() {
+			undoStack.Add(new SketchSnapshot(points, multiPartContours, mode));
+			if (undoStack.Count > 20) undoStack.RemoveAt(0);
+		}
+
+		void PerformUndo() {
+			if (undoStack.Count == 0) {
+				points.Clear();
+				multiPartContours.Clear();
+				mode = OperationMode.Default;
+				return;
+			}
+			var state = undoStack[undoStack.Count - 1];
+			undoStack.RemoveAt(undoStack.Count - 1);
+			points = state.pts;
+			multiPartContours = state.contours;
+			mode = state.opMode;
+		}
+
+>>>>>>> Stashed changes
 		public void Reset () {
 			puppets.ForEach(puppet => {
 				puppet.Ignore();
 				Destroy(puppet.gameObject);
 			});
 			puppets.Clear();
+			ClearAll(); // Clear all sketch lines when resetting
 		}
 
 		void OnDrawGizmos () {
@@ -969,7 +1075,47 @@ void BuildWithDomainStitching () {
 			}
 		}
 
+		List<List<Vector2>> SplitContourByEraser(List<Vector2> contour, Vector2 p2D, float radius, ref bool modified) {
+			List<List<Vector2>> segments = new List<List<Vector2>>();
+			List<Vector2> currentPart = new List<Vector2>();
+			for(int i = 0; i < contour.Count; i++) {
+				if (Vector2.Distance(p2D, contour[i]) > radius) {
+					currentPart.Add(contour[i]);
+				} else {
+					modified = true;
+					if (currentPart.Count > 0) {
+						if (currentPart.Count > 1) segments.Add(currentPart);
+						currentPart = new List<Vector2>();
+					}
+				}
+			}
+			if (currentPart.Count > 1) {
+				segments.Add(currentPart);
+			}
+			return segments;
+		}
+
 		void OnRenderObject () {
+
+			if (mode == OperationMode.Erase) {
+				var screen = Input.mousePosition;
+				screen.z = screenZ;
+				var p = cam.ScreenToWorldPoint(screen);
+				p = transform.InverseTransformPoint(p);
+				
+				lineMat.SetColor("_Color", new Color(1f, 0.2f, 0.2f, 0.8f));
+				lineMat.SetPass(0);
+				GL.Begin(GL.LINES);
+				int segs = 32;
+				float r = 0.5f;
+				for(int i = 0; i <= segs; i++) {
+					float a1 = i * Mathf.PI * 2f / segs;
+					float a2 = (i+1) * Mathf.PI * 2f / segs;
+					GL.Vertex3(p.x + Mathf.Cos(a1)*r, p.y + Mathf.Sin(a1)*r, p.z);
+					GL.Vertex3(p.x + Mathf.Cos(a2)*r, p.y + Mathf.Sin(a2)*r, p.z);
+				}
+				GL.End();
+			}
 
 			if(points != null) {
 				GL.PushMatrix();
@@ -1116,6 +1262,7 @@ void BuildWithDomainStitching () {
 					rigConnectFirst  = -1;
 				}
 			} else if (isAnimationMode) {
+<<<<<<< Updated upstream
 				float rx = Screen.width - 210;
 				GUIStyle lbl = new GUIStyle(GUI.skin.label);
 				lbl.fontSize = 16;
@@ -1133,7 +1280,22 @@ void BuildWithDomainStitching () {
 					}
 					GUI.Label(new Rect(rx, 140, 200, 24), "Frames: " + activePuppet.animMaxFrames, lbl);
 					GUI.Label(new Rect(rx, 170, 200, 24), "Current: " + activePuppet.animCurrentFrame, lbl);
+=======
+				DrawPanel(new Rect(rx, contextualY, 200, 210), "─ Anim Mode ─");
+				if (GUI.Button(new Rect(rx + 10, contextualY + 35, 180, 22), "Exit Anim Mode", style)) isAnimationMode = false;
+				
+				GUIStyle animLbl = new GUIStyle(GUI.skin.label);
+				animLbl.fontSize = 11; animLbl.normal.textColor = Color.white;
+
+				if (activePuppet != null) {
+					if (GUI.Button(new Rect(rx + 10, contextualY + 62, 180, 22), "Clear Anims", style)) activePuppet.ClearAnimation();
+					GUI.Label(new Rect(rx + 10, contextualY + 90, 180, 20), "Frames: " + activePuppet.animMaxFrames, animLbl);
+					GUI.Label(new Rect(rx + 10, contextualY + 110, 180, 20), "Current: " + activePuppet.animCurrentFrame, animLbl);
+>>>>>>> Stashed changes
 				}
+
+				GUI.Label(new Rect(rx + 10, contextualY + 135, 180, 20), "Brush Size: " + animPathBrushSize.ToString("F2"), animLbl);
+				animPathBrushSize = GUI.HorizontalSlider(new Rect(rx + 10, contextualY + 155, 180, 18), animPathBrushSize, 0.05f, 5f);
 			} else if (isEditMode || mode == OperationMode.DrawOnSurface) {
 				DrawColorEditor(style);
 			} else {
@@ -1182,6 +1344,7 @@ void BuildWithDomainStitching () {
 				float py = 318f;
 				Rect panelRect = new Rect(px - 5, py - 4, 213, 120);
 
+<<<<<<< Updated upstream
 				if (Event.current.type == EventType.MouseDown && !panelRect.Contains(Event.current.mousePosition)) {
 					showRegionPanel = false;
 				}
@@ -1206,6 +1369,23 @@ void BuildWithDomainStitching () {
 			if (GUI.Button(new Rect(10, 10, 87, 22), (isDrawingEnabled ? "DRAW" : "VIEW"), style)) {
 				isDrawingEnabled = !isDrawingEnabled;
 			}
+=======
+			// -- General panel (Y:5, h:205) --
+			DrawPanel(new Rect(5, 5, 145, 205), "─ General ─");
+
+			if (isDrawingEnabled && mode != OperationMode.Erase) GUI.backgroundColor = new Color(0.15f, 0.55f, 0.9f);
+			if (GUI.Button(new Rect(15, 30, 60, 24), "DRAW", style)) {
+				isDrawingEnabled = !isDrawingEnabled;
+				if (mode == OperationMode.Erase) mode = OperationMode.Default;
+			}
+			GUI.backgroundColor = _bg;
+
+			if (mode == OperationMode.Erase) GUI.backgroundColor = new Color(0.9f, 0.2f, 0.2f);
+			if (GUI.Button(new Rect(80, 30, 60, 24), "ERASE", style)) {
+				mode = (mode == OperationMode.Erase) ? OperationMode.Default : OperationMode.Erase;
+			}
+			GUI.backgroundColor = _bg;
+>>>>>>> Stashed changes
 
 			if (GUI.Button(new Rect(10, 37, 87, 22), "Gravity: " + (enableGravity ? "ON" : "OFF"), style)) {
 				enableGravity = !enableGravity;
@@ -1225,6 +1405,7 @@ void BuildWithDomainStitching () {
 			GUI.Label(new Rect(10, 180, 200, 20), "Rotate X: " + currentRotation.x.ToString("F0"), style);
 			currentRotation.x = GUI.HorizontalSlider(new Rect(10, 205, 200, 20), currentRotation.x, 0f, 360f);
 
+<<<<<<< Updated upstream
 			GUI.Label(new Rect(10, 230, 200, 20), "Rotate Y: " + currentRotation.y.ToString("F0"), style);
 			currentRotation.y = GUI.HorizontalSlider(new Rect(10, 255, 200, 20), currentRotation.y, 0f, 360f);
 
@@ -1233,6 +1414,32 @@ void BuildWithDomainStitching () {
 
 #if UNITY_EDITOR
 			if (GUI.Button(new Rect(10, 86, 87, 22), "Import", style)) {
+=======
+			GUI.backgroundColor = new Color(0.8f, 0.3f, 0.3f);
+			if (GUI.Button(new Rect(15, 170, 125, 24), "XX Clear Sketch", style)) {
+				PushUndoState();
+				points.Clear();
+				if (multiPartContours.Count == 0) mode = OperationMode.Default;
+				else mode = OperationMode.WaitingForInflation;
+			}
+			GUI.backgroundColor = _bg;
+
+			// -- Transform panel (Y:215, h:150) --
+			DrawPanel(new Rect(5, 215, 145, 150), "─ Transform ─");
+			GUIStyle rotLbl = new GUIStyle(labelStyle);
+			rotLbl.fontSize = 10;
+			GUI.Label(new Rect(15, 240, 125, 20), "Rotate X: " + currentRotation.x.ToString("F0"), rotLbl);
+			currentRotation.x = GUI.HorizontalSlider(new Rect(15, 258, 125, 18), currentRotation.x, 0f, 360f);
+			GUI.Label(new Rect(15, 278, 125, 20), "Rotate Y: " + currentRotation.y.ToString("F0"), rotLbl);
+			currentRotation.y = GUI.HorizontalSlider(new Rect(15, 296, 125, 18), currentRotation.y, 0f, 360f);
+			GUI.Label(new Rect(15, 316, 125, 20), "Rotate Z: " + currentRotation.z.ToString("F0"), rotLbl);
+			currentRotation.z = GUI.HorizontalSlider(new Rect(15, 334, 125, 18), currentRotation.z, 0f, 360f);
+
+#if UNITY_EDITOR
+			// -- Import/Export panel (Y:370) --
+			DrawPanel(new Rect(5, 370, 145, 82), "─ Files ─");
+			if (GUI.Button(new Rect(15, 390, 125, 22), "[+] Import PNG", style)) {
+>>>>>>> Stashed changes
 				string path = EditorUtility.OpenFilePanel("Select PNG Image", "", "png");
 				if (!string.IsNullOrEmpty(path)) {
 					byte[] bytes = File.ReadAllBytes(path);
@@ -1258,6 +1465,18 @@ void BuildWithDomainStitching () {
 						}
 					} else {
 						Destroy(tex);
+					}
+				}
+			}
+
+			if (GUI.Button(new Rect(15, 418, 125, 22), "[-] Export GLB", style)) {
+				if (puppets.Count > 0) {
+					Puppet pup = activePuppet != null ? activePuppet : puppets.Last();
+					string path = UnityEditor.EditorUtility.SaveFilePanel("Export GLB", "", "puppet.glb", "glb");
+					if (!string.IsNullOrEmpty(path)) {
+						var mf = pup.GetComponent<MeshFilter>();
+						var frames = pup.GenerateAnimationFrames();
+						GLBExporter.ExportAnimation(path, mf.sharedMesh, pup.mainTexture, frames, 60f);
 					}
 				}
 			}
