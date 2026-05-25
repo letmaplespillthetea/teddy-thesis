@@ -68,6 +68,7 @@ Shader "Teddy/Demo/Puppet" {
 				d = saturate(d);
 				half3 ramp = tex2D(_Ramp, float2(d, d)).rgb;
 				ramp = pow(ramp, _ToonParams.z);
+				ramp = max(ramp, half3(0.85, 0.85, 0.85)); // Ambient floor to keep it bright and colorful
 				
 				return texColor * half4(ramp, 1) * _Color;
 			}

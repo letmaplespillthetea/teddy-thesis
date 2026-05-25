@@ -21,7 +21,7 @@ Material:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_Name: Puppet
-  m_Shader: {fileID: 4800000, guid: 021159c8f4a784b01be31b14171759ce, type: 3}
+  m_Shader: {fileID: 4800000, guid: ca4b91d62092947848c78a75ffc52a5c, type: 3}
   m_Parent: {fileID: 0}
   m_ModifiedSerializedProperties: 0
   m_ValidKeywords: []

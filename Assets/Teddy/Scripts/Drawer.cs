@@ -23,7 +23,8 @@ namespace mattatz.TeddySystem.Example {
 		MoveJoint,
 		LassoJoint,
 		WaitingForInflation,
-		DrawOnSurface
+		DrawOnSurface,
+		Erase
 	};
 
 	public class Drawer : MonoBehaviour {
@@ -43,7 +44,10 @@ namespace mattatz.TeddySystem.Example {
 		[Header("Mass Spring Physics")]
 		[SerializeField] bool enableGravity = false;
 		[SerializeField] bool enablePhysics = true;
-		[SerializeField, Range(0f, 1f)] float shapeStiffness = 0.2f;
+		[SerializeField, Tooltip("Old shape-matching stiffness (kept for compatibility, unused by Fast MS solver)"), Range(0f, 1f)]
+		float shapeStiffness = 0.2f;
+		[SerializeField, Tooltip("Spring stiffness k for Fast Mass-Spring solver.\nEffective = h²·k (h=1/60). Try 1000–50000.")]
+		float springStiffness = 5000f;
 		[SerializeField, Range(0f, 1f)] float damping = 0.1f;
 
 		[SerializeField, Range(0.1f, 2f)] float inflationAmount = 1.0f;
@@ -93,11 +97,50 @@ namespace mattatz.TeddySystem.Example {
 		float    regionEditStiffness = 0.2f;
 		float    regionEditDamping   = 0.1f;
 
+		struct SketchSnapshot {
+			public List<Vector2> pts;
+			public List<List<Vector2>> contours;
+			public OperationMode opMode;
+
+			public SketchSnapshot(List<Vector2> pts, List<List<Vector2>> contours, OperationMode opMode) {
+				this.pts = new List<Vector2>(pts);
+				this.contours = new List<List<Vector2>>();
+				foreach (var c in contours) {
+					this.contours.Add(new List<Vector2>(c));
+				}
+				this.opMode = opMode;
+			}
+		}
+
+		List<SketchSnapshot> undoStack = new List<SketchSnapshot>();
+
 		// For click-vs-drag detection in MoveJoint mode
 		Vector2 dragStartMousePos;
 		
 		// --- Animation Mode ---
 		public bool isAnimationMode = false;
+		[Header("Animation Path Settings")]
+		[SerializeField] Color animPathColor = new Color(0.6f, 0.6f, 0.6f, 0.4f);
+		[SerializeField] Color animBluePathColor = new Color(0.4f, 0.4f, 0.8f, 0.4f);
+		[SerializeField, Range(0.05f, 5f)] float animPathBrushSize = 0.5f;
+		
+		// --- Color History ---
+		List<Color> colorHistory = new List<Color>();
+		void AddColorToHistory(Color c) {
+			// Don't add gray/white defaults if they are too generic? No, user wants applied colors.
+			// Remove if already exists to move it to front
+			for(int i = 0; i < colorHistory.Count; i++) {
+				if (ColorEquals(colorHistory[i], c)) {
+					colorHistory.RemoveAt(i);
+					break;
+				}
+			}
+			colorHistory.Insert(0, c);
+			if (colorHistory.Count > 6) colorHistory.RemoveAt(6);
+		}
+		bool ColorEquals(Color a, Color b) {
+			return Mathf.Abs(a.r-b.r) < 0.001f && Mathf.Abs(a.g-b.g) < 0.001f && Mathf.Abs(a.b-b.b) < 0.001f;
+		}
 		public bool isAnimDragValid = false;
 
 		Texture2D colorWheel;
@@ -152,6 +195,66 @@ namespace mattatz.TeddySystem.Example {
 		}
 
 		void Update () {
+			// Handle Ctrl+Z Undo
+			if ((Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)) && Input.GetKeyDown(KeyCode.Z)) {
+				PerformUndo();
+			}
+
+			// Keyboard shortcuts for interaction modes
+			if (Input.GetKeyDown(KeyCode.E) && !Input.GetKey(KeyCode.LeftControl) && !Input.GetKey(KeyCode.RightControl)) {
+				isEditMode = !isEditMode;
+				isAnimationMode = false;
+				isRigEditMode = false;
+				mode = OperationMode.Default;
+				if (isEditMode && activePuppet != null) activePuppet.StartEditMode();
+				else if (!isEditMode && activePuppet != null) activePuppet.CancelEditMode();
+			}
+			if (Input.GetKeyDown(KeyCode.P)) {
+				if (mode == OperationMode.DrawOnSurface) {
+					mode = OperationMode.Default;
+				} else {
+					mode = OperationMode.DrawOnSurface;
+					isEditMode = false;
+					isAnimationMode = false;
+					isRigEditMode = false;
+				}
+			}
+			if (Input.GetKeyDown(KeyCode.R)) {
+				if (isRigEditMode) {
+					isRigEditMode = false;
+					rigEditPuppet = null;
+				} else if (activePuppet != null) {
+					isRigEditMode = true;
+					rigEditPuppet = activePuppet;
+					isEditMode = false;
+					isAnimationMode = false;
+					mode = OperationMode.Default;
+				}
+			}
+			if (Input.GetKeyDown(KeyCode.L)) {
+				isLassoMode = !isLassoMode;
+				mode = isLassoMode ? OperationMode.LassoJoint : OperationMode.Default;
+			}
+			if (Input.GetKeyDown(KeyCode.A)) {
+				isAnimationMode = !isAnimationMode;
+				isEditMode = false;
+				isRigEditMode = false;
+				mode = OperationMode.Default;
+			}
+			if (Input.GetKeyDown(KeyCode.G)) {
+				enableGravity = !enableGravity;
+				foreach (var p in puppets) {
+					if (p != null) {
+						var body = p.GetComponent<Rigidbody>();
+						if (body != null) body.useGravity = enableGravity;
+						p.gravity = enableGravity ? 9.81f : 0f;
+					}
+				}
+			}
+			if (Input.GetKeyDown(KeyCode.M)) {
+				showSkeleton = !showSkeleton;
+			}
+
 			// Apply rotation from UI sliders
 			transform.localEulerAngles = currentRotation;
 
@@ -176,7 +279,11 @@ namespace mattatz.TeddySystem.Example {
 				p.jointRadius = jointRadius;
 				p.enablePhysics = enablePhysics;
 				p.shapeStiffness = shapeStiffness;
+				p.springStiffness = springStiffness;  // Fast Mass-Spring stiffness
 				p.damping = damping;
+				p.animPathColor = animPathColor;
+				p.animBluePathColor = animBluePathColor;
+				p.animPathBrushSize = animPathBrushSize;
 			}
 
 			var bottom = cam.ViewportToWorldPoint(new Vector3(0.5f, 0f, screenZ));
@@ -187,10 +294,17 @@ namespace mattatz.TeddySystem.Example {
 
 			Vector2 guiMouse = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
 			// Area for the new UI controls
-			bool isOverLeftUI  = new Rect(10, 10, 200, 350).Contains(guiMouse);
-			// Right panel: buttons + region panel (220 × 320 when region panel is visible)
-			bool isOverRightUI = new Rect(Screen.width - 220, 10, 220,
-				isEditMode ? 400 : (showRegionPanel ? 320 : 280)).Contains(guiMouse);
+			bool isOverLeftUI  = new Rect(10, 10, 200, 500).Contains(guiMouse);
+			
+			// Right panel: dynamically calculate height based on active panels
+			float rightPanelHeight = 270; // Base (Mesh Gen + Interaction Modes)
+			if (isEditMode || mode == OperationMode.DrawOnSurface) rightPanelHeight += 400;
+			else if (isRigEditMode) rightPanelHeight += 150;
+			else if (isAnimationMode) rightPanelHeight += 200;
+			if (showRegionPanel) rightPanelHeight += 130;
+
+			// Right UI Area for blocking clicks
+			bool isOverRightUI = new Rect(Screen.width - 220, 0, 220, Screen.height).Contains(guiMouse);
 			
 			// Inflation buttons in center bottom
 			bool isOverCenterUI = false;
@@ -246,9 +360,10 @@ namespace mattatz.TeddySystem.Example {
 							}
 						} else if (!isLassoMode) {
 							// Only allow sketch-drawing when enabled AND lasso is NOT armed
-							if (isDrawingEnabled && !isAnimationMode) {
+							if (isDrawingEnabled && !isAnimationMode && mode != OperationMode.Erase) {
 								activePuppet = null;
 								isEditMode = false;
+								PushUndoState(); // Save state before starting to draw
 								// Clear(); // Don't clear multiPartContours here, just the current points
 								points.Clear();
 								mode = OperationMode.Draw;
@@ -280,7 +395,7 @@ namespace mattatz.TeddySystem.Example {
 			case OperationMode.WaitingForInflation:
 				if(Input.GetMouseButtonDown(0) && !isOverUI) {
 					// If clicking background while waiting, start a new drawing
-					// Clear(); 
+					PushUndoState(); // Save state before starting to draw
 					points.Clear();
 					mode = OperationMode.Draw;
 				}
@@ -406,6 +521,37 @@ namespace mattatz.TeddySystem.Example {
 					isSurfaceDrawing = false;
 					surfaceDrawingTarget = null;
 					Debug.Log("[DrawSurface] Stopped painting");
+				}
+				break;
+
+			case OperationMode.Erase:
+				if (Input.GetMouseButtonDown(0) && !isOverUI) {
+					PushUndoState();
+				} else if (Input.GetMouseButton(0) && !isOverUI) {
+					var p = cam.ScreenToWorldPoint(screen);
+					p = transform.InverseTransformPoint(p);
+					var p2D = new Vector2(p.x, p.y);
+					float eraserRadius = 0.5f;
+					bool modified = false;
+
+					if (points != null && points.Count > 0) {
+						var newParts = SplitContourByEraser(points, p2D, eraserRadius, ref modified);
+						if (newParts.Count > 0) {
+							points = newParts[newParts.Count - 1];
+							for(int i = 0; i < newParts.Count - 1; i++) multiPartContours.Add(newParts[i]);
+						} else if (modified) {
+							points.Clear();
+						}
+					}
+
+					if (multiPartContours != null && multiPartContours.Count > 0) {
+						List<List<Vector2>> newMultiParts = new List<List<Vector2>>();
+						for(int c = 0; c < multiPartContours.Count; c++) {
+							var segments = SplitContourByEraser(multiPartContours[c], p2D, eraserRadius, ref modified);
+							newMultiParts.AddRange(segments);
+						}
+						if (modified) multiPartContours = newMultiParts;
+					}
 				}
 				break;
 
@@ -951,12 +1097,32 @@ void BuildWithDomainStitching () {
 			LocalStorage.SaveList<Vector2>(points, "points.json");
 		}
 
+		void PushUndoState() {
+			undoStack.Add(new SketchSnapshot(points, multiPartContours, mode));
+			if (undoStack.Count > 10) undoStack.RemoveAt(0);
+		}
+
+		void PerformUndo() {
+			if (undoStack.Count == 0) {
+				points.Clear();
+				multiPartContours.Clear();
+				mode = OperationMode.Default;
+				return;
+			}
+			var state = undoStack[undoStack.Count - 1];
+			undoStack.RemoveAt(undoStack.Count - 1);
+			points = state.pts;
+			multiPartContours = state.contours;
+			mode = state.opMode;
+		}
+
 		public void Reset () {
 			puppets.ForEach(puppet => {
 				puppet.Ignore();
 				Destroy(puppet.gameObject);
 			});
 			puppets.Clear();
+			ClearAll(); // Clear all sketch lines when resetting
 		}
 
 		void OnDrawGizmos () {
@@ -969,7 +1135,47 @@ void BuildWithDomainStitching () {
 			}
 		}
 
+		List<List<Vector2>> SplitContourByEraser(List<Vector2> contour, Vector2 p2D, float radius, ref bool modified) {
+			List<List<Vector2>> segments = new List<List<Vector2>>();
+			List<Vector2> currentPart = new List<Vector2>();
+			for(int i = 0; i < contour.Count; i++) {
+				if (Vector2.Distance(p2D, contour[i]) > radius) {
+					currentPart.Add(contour[i]);
+				} else {
+					modified = true;
+					if (currentPart.Count > 0) {
+						if (currentPart.Count > 1) segments.Add(currentPart);
+						currentPart = new List<Vector2>();
+					}
+				}
+			}
+			if (currentPart.Count > 1) {
+				segments.Add(currentPart);
+			}
+			return segments;
+		}
+
 		void OnRenderObject () {
+
+			if (mode == OperationMode.Erase) {
+				var screen = Input.mousePosition;
+				screen.z = screenZ;
+				var p = cam.ScreenToWorldPoint(screen);
+				p = transform.InverseTransformPoint(p);
+				
+				lineMat.SetColor("_Color", new Color(1f, 0.2f, 0.2f, 0.8f));
+				lineMat.SetPass(0);
+				GL.Begin(GL.LINES);
+				int segs = 32;
+				float r = 0.5f;
+				for(int i = 0; i <= segs; i++) {
+					float a1 = i * Mathf.PI * 2f / segs;
+					float a2 = (i+1) * Mathf.PI * 2f / segs;
+					GL.Vertex3(p.x + Mathf.Cos(a1)*r, p.y + Mathf.Sin(a1)*r, p.z);
+					GL.Vertex3(p.x + Mathf.Cos(a2)*r, p.y + Mathf.Sin(a2)*r, p.z);
+				}
+				GL.End();
+			}
 
 			if(points != null) {
 				GL.PushMatrix();
@@ -1033,9 +1239,20 @@ void BuildWithDomainStitching () {
 		}
 
 		void OnGUI() {
+			Color _bg = GUI.backgroundColor;
+			// Set global button background to dark grey/black matching the reference
+			GUI.backgroundColor = new Color(0.18f, 0.18f, 0.18f, 1f);
+			
 			GUIStyle style = new GUIStyle(GUI.skin.button);
 			style.fontSize = 9;
+			style.normal.textColor = Color.white;
+			style.hover.textColor = Color.white;
+			style.active.textColor = Color.white;
 			
+			GUIStyle labelStyle = new GUIStyle(GUI.skin.label);
+			labelStyle.fontSize = 11;
+			labelStyle.normal.textColor = Color.white;
+
 			if (activePuppet != null) {
 				var renderer = activePuppet.GetComponent<MeshRenderer>();
 				if (renderer != null) {
@@ -1065,149 +1282,25 @@ void BuildWithDomainStitching () {
 				}
 			}
 
-			// ── Mesh Generation Controls ────────────────────────────────────
-			GUIStyle labelStyle = new GUIStyle(GUI.skin.label);
-			labelStyle.fontSize = 14;
-			labelStyle.normal.textColor = Color.black;
-
-			GUI.Box(new Rect(Screen.width - 210, 10, 200, 140), GUIContent.none);
-			GUI.Label(new Rect(Screen.width - 200, 15, 180, 20), "─ Mesh Generation ─", labelStyle);
-
-			GUI.Label(new Rect(Screen.width - 200, 38, 180, 16), "Inflation: " + inflationAmount.ToString("F2"), labelStyle);
-			inflationAmount = GUI.HorizontalSlider(new Rect(Screen.width - 200, 58, 180, 18), inflationAmount, 0.1f, 2f);
-			smoothHeightFields = GUI.Toggle(new Rect(Screen.width - 200, 80, 180, 20), smoothHeightFields, " Smooth Mesh");
-
-			bool prevStitching = useDomainStitching;
-			useDomainStitching = GUI.Toggle(new Rect(Screen.width - 200, 105, 180, 20), useDomainStitching, " Domain Stitching");
-			if (prevStitching != useDomainStitching) {
-				Debug.Log($"Domain Stitching: {(useDomainStitching ? "ON" : "OFF")}");
-			}
-
-			// ── Contextual Controls ──────────────────────────────────────────
-			if (isRigEditMode) {
-				float rx = Screen.width - 210;
-				GUIStyle lbl = new GUIStyle(GUI.skin.label);
-				lbl.fontSize = 16;
-				lbl.normal.textColor = Color.white;
-				GUI.Box(new Rect(rx - 5, 5, 215, 250), GUIContent.none);
-				GUI.Label(new Rect(rx, 10, 200, 24), "── Rig Edit Mode ──", lbl);
-				
-				if (rigSelectedJoint >= 0) {
-					if (GUI.Button(new Rect(rx, 35, 87, 19), (rigConnectMode ? "Cancel Link" : "Connect"), style)) {
-						if (rigConnectMode) {
-							rigConnectMode = false;
-							rigConnectFirst = -1;
-						} else {
-							rigConnectMode = true;
-							rigConnectFirst = rigSelectedJoint;
-						}
-					}
-					if (GUI.Button(new Rect(rx, 59, 87, 19), "Remove", style)) {
-						rigEditPuppet.RemoveJoint(rigSelectedJoint);
-						rigSelectedJoint = -1;
-					}
-				}
-
-				if (GUI.Button(new Rect(rx, 93, 87, 19), "Done", style)) {
-					isRigEditMode    = false;
-					rigEditPuppet    = null;
-					rigSelectedJoint = -1;
-					rigConnectMode   = false;
-					rigConnectFirst  = -1;
-				}
-			} else if (isAnimationMode) {
-				float rx = Screen.width - 210;
-				GUIStyle lbl = new GUIStyle(GUI.skin.label);
-				lbl.fontSize = 16;
-				lbl.normal.textColor = Color.white;
-				GUI.Box(new Rect(rx - 5, 5, 215, 280), GUIContent.none);
-				GUI.Label(new Rect(rx, 10, 200, 24), "── Anim Mode ──", lbl);
-				
-				if (GUI.Button(new Rect(rx, 35, 87, 19), "Exit Anim Mode", style)) {
-					isAnimationMode = false;
-				}
-
-				if (activePuppet != null) {
-					if (GUI.Button(new Rect(rx, 59, 87, 19), "Clear Anims", style)) {
-						activePuppet.ClearAnimation();
-					}
-					GUI.Label(new Rect(rx, 140, 200, 24), "Frames: " + activePuppet.animMaxFrames, lbl);
-					GUI.Label(new Rect(rx, 170, 200, 24), "Current: " + activePuppet.animCurrentFrame, lbl);
-				}
-			} else if (isEditMode || mode == OperationMode.DrawOnSurface) {
-				DrawColorEditor(style);
-			} else {
-				// ── Normal play mode right panel ─────────────────────────────
-				float startY = 160;
-
-				if (GUI.Button(new Rect(Screen.width - 210, startY, 87, 22), "Edit Mode", style)) {
-					isEditMode = true;
-					if (activePuppet != null) activePuppet.StartEditMode();
-				}
-
-				if (GUI.Button(new Rect(Screen.width - 105, startY, 87, 22), "Draw Surf", style)) {
-					mode = OperationMode.DrawOnSurface;
-				}
-				startY += 26;
-				
-				if (GUI.Button(new Rect(Screen.width - 210, startY, 87, 22), "Rig Mode", style)) {
-					if (activePuppet != null) {
-						isRigEditMode = true;
-						rigEditPuppet = activePuppet;
-					}
-				}
-
-				if (GUI.Button(new Rect(Screen.width - 105, startY, 87, 22), (isLassoMode ? "Cancel" : "Physics"), style)) {
-					isLassoMode = !isLassoMode;
-					mode = isLassoMode ? OperationMode.LassoJoint : OperationMode.Default;
-				}
-				startY += 26;
-
-				if (GUI.Button(new Rect(Screen.width - 210, startY, 87, 22), "Anim Mode", style)) {
-					isAnimationMode = true;
-				}
-				
-				if (GUI.Button(new Rect(Screen.width - 105, startY, 87, 22), "Reset All", style)) {
-					foreach (var p in puppets) if (p != null) p.ResetLasso();
-					showRegionPanel = false;
-					mode = OperationMode.Default;
-					isLassoMode = false;
-				}
-			}
-			GUI.enabled = true;
-
-			// ── Region Physics panel (Overlays contextual panel if active) ────────────────
-			if (showRegionPanel && regionPuppet != null && selectedRegion >= 0) {
-				float px = Screen.width - 210;
-				float py = 318f;
-				Rect panelRect = new Rect(px - 5, py - 4, 213, 120);
-
-				if (Event.current.type == EventType.MouseDown && !panelRect.Contains(Event.current.mousePosition)) {
-					showRegionPanel = false;
-				}
-
-				GUIStyle lbl = new GUIStyle(GUI.skin.label);
-				lbl.fontSize = 16;
-				lbl.normal.textColor = Color.black;
-
-				GUI.Box(panelRect, GUIContent.none);
-				GUI.Label(new Rect(px, py, 200, 22), $"Region {selectedRegion} Physics", lbl);
-
-				GUI.Label(new Rect(px, py + 26, 200, 20), $"Stiffness: {regionEditStiffness:F2}", lbl);
-				regionEditStiffness = GUI.HorizontalSlider(new Rect(px, py + 46, 200, 18), regionEditStiffness, 0f, 1f);
-
-				GUI.Label(new Rect(px, py + 68, 200, 20), $"Damping:   {regionEditDamping:F2}", lbl);
-				regionEditDamping = GUI.HorizontalSlider(new Rect(px, py + 88, 200, 18), regionEditDamping, 0f, 1f);
-				
-				regionPuppet.SetRegionParams(selectedRegion, regionEditStiffness, regionEditDamping);
-			}
-			GUI.enabled = true;
-
-			if (GUI.Button(new Rect(10, 10, 87, 22), (isDrawingEnabled ? "DRAW" : "VIEW"), style)) {
+			// ── Left Side Panels ─────────────────────────────────────────────
+			
+			// -- General Panel (Y:5, h:230) --
+			DrawPanel(new Rect(5, 5, 145, 230), "─ General ─");
+			
+			if (isDrawingEnabled && mode != OperationMode.Erase) GUI.backgroundColor = new Color(0.15f, 0.55f, 0.9f); // Blue when active
+			if (GUI.Button(new Rect(15, 30, 60, 24), "DRAW", style)) {
 				isDrawingEnabled = !isDrawingEnabled;
+				if (mode == OperationMode.Erase) mode = OperationMode.Default;
 			}
+			GUI.backgroundColor = new Color(0.18f, 0.18f, 0.18f, 1f);
 
-			if (GUI.Button(new Rect(10, 37, 87, 22), "Gravity: " + (enableGravity ? "ON" : "OFF"), style)) {
+			if (mode == OperationMode.Erase) GUI.backgroundColor = new Color(0.9f, 0.2f, 0.2f); // Red when active
+			if (GUI.Button(new Rect(80, 30, 60, 24), "ERASE", style)) {
+				mode = (mode == OperationMode.Erase) ? OperationMode.Default : OperationMode.Erase;
+			}
+			GUI.backgroundColor = new Color(0.18f, 0.18f, 0.18f, 1f);
+
+			if (GUI.Button(new Rect(15, 65, 125, 22), "[G] Grav: " + (enableGravity ? "ON" : "OFF"), style)) {
 				enableGravity = !enableGravity;
 				foreach (var p in puppets) {
 					if (p != null) {
@@ -1218,21 +1311,43 @@ void BuildWithDomainStitching () {
 				}
 			}
 
-			if (GUI.Button(new Rect(10, 64, 87, 17), "Reset Rot", style)) {
+			if (GUI.Button(new Rect(15, 95, 125, 22), "[~] Reset Rot", style)) {
 				currentRotation = Vector3.zero;
 			}
 
-			GUI.Label(new Rect(10, 180, 200, 20), "Rotate X: " + currentRotation.x.ToString("F0"), style);
-			currentRotation.x = GUI.HorizontalSlider(new Rect(10, 205, 200, 20), currentRotation.x, 0f, 360f);
+			if (GUI.Button(new Rect(15, 125, 125, 22), "[M] Show Mesh", style)) {
+				showSkeleton = !showSkeleton;
+			}
 
-			GUI.Label(new Rect(10, 230, 200, 20), "Rotate Y: " + currentRotation.y.ToString("F0"), style);
-			currentRotation.y = GUI.HorizontalSlider(new Rect(10, 255, 200, 20), currentRotation.y, 0f, 360f);
+			if (GUI.Button(new Rect(15, 155, 125, 22), "<< Undo (Ctrl+Z)", style)) {
+				PerformUndo();
+			}
 
-			GUI.Label(new Rect(10, 280, 200, 20), "Rotate Z: " + currentRotation.z.ToString("F0"), style);
-			currentRotation.z = GUI.HorizontalSlider(new Rect(10, 305, 200, 20), currentRotation.z, 0f, 360f);
+			GUI.backgroundColor = new Color(0.8f, 0.3f, 0.3f);
+			if (GUI.Button(new Rect(15, 185, 125, 24), "XX Clear Sketch", style)) {
+				PushUndoState();
+				points.Clear();
+				if (multiPartContours.Count == 0) mode = OperationMode.Default;
+				else mode = OperationMode.WaitingForInflation;
+			}
+			GUI.backgroundColor = new Color(0.18f, 0.18f, 0.18f, 1f);
 
+			// -- Transform Panel (Y:245, h:160) --
+			DrawPanel(new Rect(5, 245, 145, 160), "─ Transform ─");
+			GUIStyle rotLbl = new GUIStyle(GUI.skin.label);
+			rotLbl.fontSize = 10;
+			rotLbl.normal.textColor = Color.white;
+			GUI.Label(new Rect(15, 265, 125, 16), "Rotate X: " + currentRotation.x.ToString("F0"), rotLbl);
+			currentRotation.x = GUI.HorizontalSlider(new Rect(15, 281, 125, 18), currentRotation.x, 0f, 360f);
+			GUI.Label(new Rect(15, 301, 125, 16), "Rotate Y: " + currentRotation.y.ToString("F0"), rotLbl);
+			currentRotation.y = GUI.HorizontalSlider(new Rect(15, 317, 125, 18), currentRotation.y, 0f, 360f);
+			GUI.Label(new Rect(15, 337, 125, 16), "Rotate Z: " + currentRotation.z.ToString("F0"), rotLbl);
+			currentRotation.z = GUI.HorizontalSlider(new Rect(15, 353, 125, 18), currentRotation.z, 0f, 360f);
+
+			// -- Files Panel (Y:415, h:82) --
+			DrawPanel(new Rect(5, 415, 145, 82), "─ Files ─");
 #if UNITY_EDITOR
-			if (GUI.Button(new Rect(10, 86, 87, 22), "Import", style)) {
+			if (GUI.Button(new Rect(15, 435, 125, 22), "[+] Import PNG", style)) {
 				string path = EditorUtility.OpenFilePanel("Select PNG Image", "", "png");
 				if (!string.IsNullOrEmpty(path)) {
 					byte[] bytes = File.ReadAllBytes(path);
@@ -1241,7 +1356,7 @@ void BuildWithDomainStitching () {
 					
 					var pixelContour = TextureContourExtractor.ExtractContour(tex);
 					if (pixelContour.Count > 3) {
-						Reset(); // Reset clears the scene of old models before building the new one
+						Reset();
 						float userScale = cam.orthographic ? 
 							(2f * cam.orthographicSize * 0.6f) : 
 							(2f * screenZ * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) * 0.6f);
@@ -1261,7 +1376,169 @@ void BuildWithDomainStitching () {
 					}
 				}
 			}
+
+			if (GUI.Button(new Rect(15, 463, 125, 22), "[-] Export GLB", style)) {
+				if (puppets.Count > 0) {
+					Puppet pup = activePuppet != null ? activePuppet : puppets.Last();
+					string path = UnityEditor.EditorUtility.SaveFilePanel("Export GLB", "", "puppet.glb", "glb");
+					if (!string.IsNullOrEmpty(path)) {
+						var mf = pup.GetComponent<MeshFilter>();
+						var frames = pup.GenerateAnimationFrames();
+						GLBExporter.ExportAnimation(path, mf.sharedMesh, pup.mainTexture, frames, 60f);
+					}
+				}
+			}
 #endif
+
+			// ── Right Side Panels ────────────────────────────────────────────
+
+			// -- Mesh Generation Panel (always shown) --
+			DrawPanel(new Rect(Screen.width - 210, 5, 200, 140), "─ Mesh Generation ─");
+			GUI.Label(new Rect(Screen.width - 200, 30, 180, 16), "Inflation: " + inflationAmount.ToString("F2"), labelStyle);
+			inflationAmount = GUI.HorizontalSlider(new Rect(Screen.width - 200, 50, 180, 18), inflationAmount, 0.1f, 2f);
+			smoothHeightFields = GUI.Toggle(new Rect(Screen.width - 200, 75, 180, 20), smoothHeightFields, " Smooth Mesh");
+			bool prevStitching = useDomainStitching;
+			useDomainStitching = GUI.Toggle(new Rect(Screen.width - 200, 100, 180, 20), useDomainStitching, " Domain Stitching");
+			if (prevStitching != useDomainStitching) {
+				Debug.Log($"Domain Stitching: {(useDomainStitching ? "ON" : "OFF")}");
+			}
+
+			// -- Interaction Modes Panel (always shown) --
+			DrawPanel(new Rect(Screen.width - 210, 150, 200, 115), "─ Interaction Modes ─");
+			
+			// Highlight current mode button by changing background color
+			if (isEditMode) GUI.backgroundColor = new Color(0.2f, 0.6f, 1f, 1f);
+			if (GUI.Button(new Rect(Screen.width - 200, 175, 85, 22), "[E] Edit", style)) {
+				isEditMode = !isEditMode;
+				isAnimationMode = false;
+				isRigEditMode = false;
+				mode = OperationMode.Default;
+				if (isEditMode && activePuppet != null) activePuppet.StartEditMode();
+				else if (!isEditMode && activePuppet != null) activePuppet.CancelEditMode();
+			}
+			GUI.backgroundColor = new Color(0.18f, 0.18f, 0.18f, 1f);
+
+			if (mode == OperationMode.DrawOnSurface) GUI.backgroundColor = new Color(0.2f, 0.6f, 1f, 1f);
+			if (GUI.Button(new Rect(Screen.width - 105, 175, 85, 22), "[P] Paint", style)) {
+				if (mode == OperationMode.DrawOnSurface) {
+					mode = OperationMode.Default;
+				} else {
+					mode = OperationMode.DrawOnSurface;
+					isEditMode = false;
+					isAnimationMode = false;
+					isRigEditMode = false;
+				}
+			}
+			GUI.backgroundColor = new Color(0.18f, 0.18f, 0.18f, 1f);
+
+			if (isRigEditMode) GUI.backgroundColor = new Color(0.2f, 0.6f, 1f, 1f);
+			if (GUI.Button(new Rect(Screen.width - 200, 202, 85, 22), "[R] Rig", style)) {
+				if (isRigEditMode) {
+					isRigEditMode = false;
+					rigEditPuppet = null;
+				} else if (activePuppet != null) {
+					isRigEditMode = true;
+					rigEditPuppet = activePuppet;
+					isEditMode = false;
+					isAnimationMode = false;
+					mode = OperationMode.Default;
+				}
+			}
+			GUI.backgroundColor = new Color(0.18f, 0.18f, 0.18f, 1f);
+
+			if (isLassoMode) GUI.backgroundColor = new Color(0.2f, 0.6f, 1f, 1f);
+			if (GUI.Button(new Rect(Screen.width - 105, 202, 85, 22), "[L] Phys", style)) {
+				isLassoMode = !isLassoMode;
+				mode = isLassoMode ? OperationMode.LassoJoint : OperationMode.Default;
+			}
+			GUI.backgroundColor = new Color(0.18f, 0.18f, 0.18f, 1f);
+
+			if (isAnimationMode) GUI.backgroundColor = new Color(0.2f, 0.6f, 1f, 1f);
+			if (GUI.Button(new Rect(Screen.width - 200, 229, 180, 22), "[A] Anim", style)) {
+				isAnimationMode = !isAnimationMode;
+				isEditMode = false;
+				isRigEditMode = false;
+				mode = OperationMode.Default;
+			}
+			GUI.backgroundColor = new Color(0.18f, 0.18f, 0.18f, 1f);
+
+			// -- Contextual Panels --
+			if (isRigEditMode) {
+				// Rig Mode Panel
+				float rx = Screen.width - 210;
+				float ry = 270;
+				DrawPanel(new Rect(rx, ry, 200, 120), "─ Rig Edit Mode ─");
+				if (rigSelectedJoint >= 0) {
+					if (GUI.Button(new Rect(rx + 10, ry + 30, 85, 22), (rigConnectMode ? "Cancel Link" : "Connect"), style)) {
+						if (rigConnectMode) {
+							rigConnectMode = false;
+							rigConnectFirst = -1;
+						} else {
+							rigConnectMode = true;
+							rigConnectFirst = rigSelectedJoint;
+						}
+					}
+					if (GUI.Button(new Rect(rx + 105, ry + 30, 85, 22), "Remove", style)) {
+						rigEditPuppet.RemoveJoint(rigSelectedJoint);
+						rigSelectedJoint = -1;
+					}
+				}
+				if (GUI.Button(new Rect(rx + 10, ry + 60, 180, 24), "Done", style)) {
+					isRigEditMode    = false;
+					rigEditPuppet    = null;
+					rigSelectedJoint = -1;
+					rigConnectMode   = false;
+					rigConnectFirst  = -1;
+				}
+			} else if (isAnimationMode) {
+				// Anim Mode Panel
+				float rx = Screen.width - 210;
+				float ry = 270;
+				DrawPanel(new Rect(rx, ry, 200, 210), "─ Anim Mode ─");
+				if (GUI.Button(new Rect(rx + 10, ry + 30, 180, 22), "Exit Anim Mode", style)) isAnimationMode = false;
+				
+				GUIStyle animLbl = new GUIStyle(GUI.skin.label);
+				animLbl.fontSize = 11; animLbl.normal.textColor = Color.white;
+
+				if (activePuppet != null) {
+					if (GUI.Button(new Rect(rx + 10, ry + 60, 180, 22), "Clear Anims", style)) activePuppet.ClearAnimation();
+					GUI.Label(new Rect(rx + 10, ry + 90, 180, 20), "Frames: " + activePuppet.animMaxFrames, animLbl);
+					GUI.Label(new Rect(rx + 10, ry + 110, 180, 20), "Current: " + activePuppet.animCurrentFrame, animLbl);
+				}
+
+				GUI.Label(new Rect(rx + 10, ry + 135, 180, 20), "Brush Size: " + animPathBrushSize.ToString("F2"), animLbl);
+				animPathBrushSize = GUI.HorizontalSlider(new Rect(rx + 10, ry + 155, 180, 18), animPathBrushSize, 0.05f, 5f);
+			} else if (isEditMode || mode == OperationMode.DrawOnSurface) {
+				// Surface Drawing Panel
+				DrawColorEditor(style);
+			}
+
+			// -- Region Physics Panel --
+			if (showRegionPanel && regionPuppet != null && selectedRegion >= 0) {
+				float px = Screen.width - 210;
+				float py = (isEditMode || mode == OperationMode.DrawOnSurface || isAnimationMode || isRigEditMode) ? 720f : 270f;
+				Rect panelRect = new Rect(px, py, 200, 120);
+
+				if (Event.current.type == EventType.MouseDown && !panelRect.Contains(Event.current.mousePosition)) {
+					showRegionPanel = false;
+				}
+
+				DrawPanel(panelRect, $"Region {selectedRegion} Physics");
+
+				GUIStyle regionLbl = new GUIStyle(GUI.skin.label);
+				regionLbl.fontSize = 10;
+				regionLbl.normal.textColor = Color.white;
+
+				GUI.Label(new Rect(px + 10, py + 30, 180, 20), $"Stiffness: {regionEditStiffness:F2}", regionLbl);
+				regionEditStiffness = GUI.HorizontalSlider(new Rect(px + 10, py + 50, 180, 18), regionEditStiffness, 0f, 1f);
+
+				GUI.Label(new Rect(px + 10, py + 72, 180, 20), $"Damping:   {regionEditDamping:F2}", regionLbl);
+				regionEditDamping = GUI.HorizontalSlider(new Rect(px + 10, py + 92, 180, 18), regionEditDamping, 0f, 1f);
+				
+				regionPuppet.SetRegionParams(selectedRegion, regionEditStiffness, regionEditDamping);
+			}
+			
+			GUI.backgroundColor = _bg;
 
 			// ── Waiting for Inflation UI ───────────────────────────────────────
 			if (mode == OperationMode.WaitingForInflation) {
@@ -1418,51 +1695,48 @@ void BuildWithDomainStitching () {
 			GUI.color = prev;
 		}
 
+		void DrawPanel(Rect rect, string title) {
+			Color prevColor = GUI.color;
+			
+			// 1. Draw solid dark grey background
+			GUI.color = new Color(0.12f, 0.12f, 0.12f, 0.95f);
+			GUI.DrawTexture(rect, Texture2D.whiteTexture);
+			
+			// 2. Draw a blue line at the very top of the panel (2px thick)
+			GUI.color = new Color(0f, 0.5f, 1f, 1f); // Vibrant blue
+			GUI.DrawTexture(new Rect(rect.x, rect.y, rect.width, 2), Texture2D.whiteTexture);
+			
+			// 3. Draw a thin white border around the panel
+			GUI.color = new Color(0.3f, 0.3f, 0.3f, 1f);
+			GUI.DrawTexture(new Rect(rect.x, rect.y + 2, rect.width, 1), Texture2D.whiteTexture); // top border
+			GUI.DrawTexture(new Rect(rect.x, rect.y + rect.height - 1, rect.width, 1), Texture2D.whiteTexture); // bottom
+			GUI.DrawTexture(new Rect(rect.x, rect.y + 2, 1, rect.height - 3), Texture2D.whiteTexture); // left
+			GUI.DrawTexture(new Rect(rect.x + rect.width - 1, rect.y + 2, 1, rect.height - 3), Texture2D.whiteTexture); // right
+			
+			GUI.color = prevColor;
+
+			GUIStyle headerStyle = new GUIStyle(GUI.skin.label);
+			headerStyle.fontSize = 11;
+			headerStyle.fontStyle = FontStyle.Bold;
+			headerStyle.alignment = TextAnchor.UpperCenter;
+			headerStyle.normal.textColor = Color.white;
+			GUI.Label(new Rect(rect.x, rect.y + 5, rect.width, 20), title, headerStyle);
+		}
+
 		void DrawColorEditor(GUIStyle style) {
-			if (GUI.Button(new Rect(Screen.width - 210, 10, 87, 17), "Done", style)) {
+			float startY = 270;
+			DrawPanel(new Rect(Screen.width - 210, startY, 200, 440), "─ Surface Drawing ─");
+			
+			// Done / Exit button
+			if (GUI.Button(new Rect(Screen.width - 200, startY + 30, 180, 24), "Done", style)) {
 				isEditMode = false;
 				if (mode == OperationMode.DrawOnSurface) mode = OperationMode.Default;
+				if (activePuppet != null) activePuppet.CancelEditMode();
 			}
 
-			// --- Brush & Eraser Controls ---
-			if (mode == OperationMode.DrawOnSurface || isEditMode) {
-				float ctrlY = 280; // Start higher due to smaller wheel
-				
-				GUIStyle lblStyle = new GUIStyle(GUI.skin.label);
-				lblStyle.normal.textColor = Color.black;
-				
-				if (mode == OperationMode.DrawOnSurface) {
-					GUI.Label(new Rect(Screen.width - 210, ctrlY, 200, 20), "Brush Size: " + brushSize.ToString("F1"), lblStyle);
-					brushSize = GUI.HorizontalSlider(new Rect(Screen.width - 210, ctrlY + 22, 200, 20), brushSize, 1f, 100f);
-					ctrlY += 50;
-				}
-
-				// Eraser Toggle
-				Color prevBgc = GUI.backgroundColor;
-				if (isEraser) GUI.backgroundColor = Color.cyan;
-				if (GUI.Button(new Rect(Screen.width - 210, ctrlY, 200, 30), isEraser ? "ERASER: ON" : "ERASER: OFF", style)) {
-					isEraser = !isEraser;
-				}
-				GUI.backgroundColor = prevBgc;
-				ctrlY += 35;
-
-				if (GUI.Button(new Rect(Screen.width - 210, ctrlY, 200, 25), "Clear All Paint", style)) {
-					if (activePuppet != null) activePuppet.ClearSurfacePaint();
-				}
-			}
-
-			if (isEditMode) {
-				if (GUI.Button(new Rect(Screen.width - 210, 32, 41, 17), "Apply", style)) {
-					if (activePuppet != null) activePuppet.ApplyColorToLastClick(selectedEditColor);
-				}
-				if (GUI.Button(new Rect(Screen.width - 105, 32, 41, 17), "Cancel", style)) {
-					isEditMode = false;
-					if (activePuppet != null) activePuppet.CancelEditMode();
-				}
-			}
-			
+			// Color wheel
 			if (colorWheel == null || colorWheel.width != 150) CreateColorWheel();
-			Rect wheelRect = new Rect(Screen.width - 185, 80, 150, 150); // Smaller and centered in the 200px panel
+			Rect wheelRect = new Rect(Screen.width - 185, startY + 65, 150, 150);
 			GUI.DrawTexture(wheelRect, colorWheel);
 			
 			Color.RGBToHSV(selectedEditColor, out float wheelH, out float wheelS, out float _);
@@ -1501,7 +1775,13 @@ void BuildWithDomainStitching () {
 				}
 			}
 
-			float newSlider = GUI.HorizontalSlider(new Rect(Screen.width - 210, 250, 200, 20), selectedValue, 0f, 1f);
+			GUIStyle textLblStyle = new GUIStyle(GUI.skin.label);
+			textLblStyle.normal.textColor = Color.white;
+			textLblStyle.fontSize = 10;
+
+			// Brightness slider
+			GUI.Label(new Rect(Screen.width - 200, startY + 225, 180, 16), "Brightness (Value)", textLblStyle);
+			float newSlider = GUI.HorizontalSlider(new Rect(Screen.width - 200, startY + 242, 180, 18), selectedValue, 0f, 1f);
 			if (newSlider != selectedValue) {
 				selectedValue = newSlider;
 				Color.RGBToHSV(selectedEditColor, out float h, out float s, out float curV);
@@ -1512,16 +1792,60 @@ void BuildWithDomainStitching () {
 				}
 			}
 
+			// Hex display
 			Color prevColor = GUI.color;
 			GUI.color = selectedEditColor;
-			GUI.DrawTexture(new Rect(Screen.width - 210, 340, 200, 40), Texture2D.whiteTexture);
+			GUI.DrawTexture(new Rect(Screen.width - 200, startY + 265, 80, 24), Texture2D.whiteTexture);
 			GUI.color = prevColor;
 
 			GUIStyle colorLabelStyle = new GUIStyle(GUI.skin.label);
 			colorLabelStyle.alignment = TextAnchor.MiddleCenter;
 			Color textColor = (selectedEditColor.r * 0.299f + selectedEditColor.g * 0.587f + selectedEditColor.b * 0.114f) > 0.5f ? Color.black : Color.white;
 			colorLabelStyle.normal.textColor = textColor;
-			GUI.Label(new Rect(Screen.width - 210, 340, 200, 40), "#" + ColorUtility.ToHtmlStringRGB(selectedEditColor), colorLabelStyle);
+			colorLabelStyle.fontSize = 10;
+			GUI.Label(new Rect(Screen.width - 200, startY + 265, 80, 24), "#" + ColorUtility.ToHtmlStringRGB(selectedEditColor), colorLabelStyle);
+
+			// Color history / swatches (draw 6 small squares from left-over history)
+			float swatchX = Screen.width - 110;
+			float swatchY = startY + 265;
+			for (int sIdx = 0; sIdx < 6; sIdx++) {
+				Color sColor = (colorHistory != null && sIdx < colorHistory.Count) ? colorHistory[sIdx] : Color.white;
+				GUI.color = sColor;
+				Rect sRect = new Rect(swatchX + (sIdx % 3) * 30, swatchY + (sIdx / 3) * 13, 25, 10);
+				if (GUI.Button(sRect, GUIContent.none)) {
+					selectedEditColor = sColor;
+					Color.RGBToHSV(selectedEditColor, out float h, out float s, out float v);
+					selectedValue = v;
+					if (activePuppet != null && isEditMode) {
+						activePuppet.isPreviewingColor = true;
+						activePuppet.UpdatePreview(selectedEditColor);
+					}
+				}
+			}
+			GUI.color = prevColor;
+
+			// Brush Size (only if Paint Mode)
+			if (mode == OperationMode.DrawOnSurface) {
+				GUI.Label(new Rect(Screen.width - 200, startY + 300, 180, 16), "Brush Size: " + brushSize.ToString("F1"), textLblStyle);
+				brushSize = GUI.HorizontalSlider(new Rect(Screen.width - 200, startY + 318, 180, 18), brushSize, 1f, 100f);
+			} else if (isEditMode) {
+				// Apply / Cancel for Edit Mode
+				if (GUI.Button(new Rect(Screen.width - 200, startY + 300, 85, 22), "Apply", style)) {
+					if (activePuppet != null) {
+						activePuppet.ApplyColorToLastClick(selectedEditColor);
+						AddColorToHistory(selectedEditColor);
+					}
+				}
+				if (GUI.Button(new Rect(Screen.width - 105, startY + 300, 85, 22), "Cancel", style)) {
+					isEditMode = false;
+					if (activePuppet != null) activePuppet.CancelEditMode();
+				}
+			}
+
+			// Clear paint button
+			if (GUI.Button(new Rect(Screen.width - 200, startY + 350, 180, 24), "Clear All Paint", style)) {
+				if (activePuppet != null) activePuppet.ClearSurfacePaint();
+			}
 		}
 
 	}

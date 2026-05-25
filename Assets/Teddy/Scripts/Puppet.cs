@@ -45,9 +45,19 @@ namespace mattatz.TeddySystem.Example {
 		public float jointRadius = 2f;
 
 		public bool enablePhysics = true;
-		public float shapeStiffness = 0.2f;
+		public float shapeStiffness = 0.2f;  // kept for Inspector compatibility
 		public float damping = 0.1f;
 		public float gravity = 0f;
+
+		[Header("Fast Mass-Spring Solver (Liu et al. 2013)")]
+		[Tooltip("Spring stiffness k_k. Effective contribution = h²·k (with h=fixedTimestep).\n" +
+		         "h=1/60 → effective = k/3600. Try 1000–100000 for rigid feel.")]
+		public float springStiffness  = 5000f;   // k_k: spring stiffness coefficient
+		public float nodeMass         = 1f;      // m_i: uniform nodal mass
+		public int   solverIterations = 10;      // local/global iterations per frame
+		// Fixed simulation timestep h – the precomputed Cholesky is valid as long
+		// as h stays constant. Smaller = more stable, larger = cheaper.
+		public float fixedTimestep    = 1f/60f;  // h for the mass-spring solver
 
 		public int draggingJoint = -1;
 		public float dragZ = 0f;
@@ -57,6 +67,62 @@ namespace mattatz.TeddySystem.Example {
 		public bool isAnimationMode = false;
 		public Dictionary<int, List<Vector3>> recordedMotions = new Dictionary<int, List<Vector3>>();
 		public bool isAnimationPlaying = false;
+		public Color animPathColor = new Color(0.6f, 0.6f, 0.6f, 0.4f);
+		public Color animBluePathColor = new Color(0.4f, 0.4f, 0.8f, 0.4f);
+		public float animPathBrushSize = 0.5f;
+
+		Texture2D animBrushTex;
+		Material animBrushMat;
+		void CreateAnimBrush() {
+			int res = 64;
+			animBrushTex = new Texture2D(res, res, TextureFormat.RGBA32, false);
+			for (int y = 0; y < res; y++) {
+				for (int x = 0; x < res; x++) {
+					float dx = (x / (float)res) - 0.5f;
+					float dy = (y / (float)res) - 0.5f;
+					float dist = Mathf.Sqrt(dx * dx + dy * dy) * 2f;
+					float alpha = Mathf.Clamp01(1f - dist);
+					alpha = Mathf.Pow(alpha, 3f); // Softer falloff
+					animBrushTex.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
+				}
+			}
+			animBrushTex.Apply();
+			animBrushMat = new Material(Shader.Find("Sprites/Default"));
+			animBrushMat.mainTexture = animBrushTex;
+		}
+
+		void DrawPathWithSoftBrush(List<Vector3> path, Camera cam, float dabSize, float spacing, bool loopClosed) {
+			for (int i = 0; i < path.Count - 1; i++) {
+				Vector3 p0 = cam.WorldToScreenPoint(path[i]);
+				Vector3 p1 = cam.WorldToScreenPoint(path[i + 1]);
+				if (p0.z > 0f && p1.z > 0f) {
+					Vector2 s0 = new Vector2(p0.x, p0.y);
+					Vector2 s1 = new Vector2(p1.x, p1.y);
+					DrawLineSegmentWithBrush(s0, s1, dabSize, spacing);
+				}
+			}
+			if (path.Count > 1 && loopClosed) {
+				Vector3 p0 = cam.WorldToScreenPoint(path[path.Count - 1]);
+				Vector3 p1 = cam.WorldToScreenPoint(path[0]);
+				if (p0.z > 0f && p1.z > 0f) {
+					Vector2 s0 = new Vector2(p0.x, p0.y);
+					Vector2 s1 = new Vector2(p1.x, p1.y);
+					DrawLineSegmentWithBrush(s0, s1, dabSize, spacing);
+				}
+			}
+		}
+
+		void DrawLineSegmentWithBrush(Vector2 s0, Vector2 s1, float dabSize, float spacing) {
+			float dist = Vector2.Distance(s0, s1);
+			int dabs = Mathf.Max(1, Mathf.FloorToInt(dist / spacing));
+			for (int j = 0; j <= dabs; j++) {
+				Vector2 p = Vector2.Lerp(s0, s1, j / (float)dabs);
+				GL.TexCoord2(0, 0); GL.Vertex3(p.x - dabSize, p.y - dabSize, 0);
+				GL.TexCoord2(1, 0); GL.Vertex3(p.x + dabSize, p.y - dabSize, 0);
+				GL.TexCoord2(1, 1); GL.Vertex3(p.x + dabSize, p.y + dabSize, 0);
+				GL.TexCoord2(0, 1); GL.Vertex3(p.x - dabSize, p.y + dabSize, 0);
+			}
+		}
 		public class BluePoint {
 			public int v0, v1, v2;
 			public Vector3 barycentric;
@@ -233,6 +299,26 @@ namespace mattatz.TeddySystem.Example {
 			isRecordingAnim = false;
 		}
 
+		public List<Vector3[]> GenerateAnimationFrames() {
+			if (animMaxFrames == 0 || skinning == null) return new List<Vector3[]>();
+			List<Vector3[]> frames = new List<Vector3[]>();
+			for (int f = 0; f < animMaxFrames; f++) {
+				List<(Vector3 start, Vector3 end)> currentBones = new List<(Vector3 start, Vector3 end)>();
+				foreach (var bi in boneIndices) {
+					Vector3 p0, p1;
+					if (recordedMotions.ContainsKey(bi.x) && f < recordedMotions[bi.x].Count) p0 = recordedMotions[bi.x][f];
+					else p0 = worldJoints[bi.x];
+					
+					if (recordedMotions.ContainsKey(bi.y) && f < recordedMotions[bi.y].Count) p1 = recordedMotions[bi.y][f];
+					else p1 = worldJoints[bi.y];
+					
+					currentBones.Add((p0, p1));
+				}
+				frames.Add(skinning.Deform(currentBones));
+			}
+			return frames;
+		}
+
 		List<(Vector3, Vector3)> skeletonBones;
 		List<Vector3> joints;
 		List<Vector2Int> boneIndices;
@@ -241,6 +327,24 @@ namespace mattatz.TeddySystem.Example {
 		List<Vector3> worldJoints;
 		List<Vector3> prevWorldJoints;
 		HarmonicSkinning skinning;
+
+		// ── Fast Mass-Spring Solver state ──────────────────────────────────────
+		// All matrices are stored as flat double arrays in row-major order.
+		// Dimension key: n = joint count, s = spring (bone) count, N = 3n, S = 3s.
+		double[] msVelocities;   // 3n: velocity per node-coordinate
+		double[] msL;            // N x N: Laplacian stiffness matrix
+		double[] msJ;            // N x S: spring incidence matrix
+		double[] msA;            // N x N: system matrix A = M + h²L (modified for pins)
+		double[] msCholeskyL;    // N x N: lower-triangular Cholesky factor of msA
+		double[] msD;            // 3s: local spring direction vectors
+		double[] msMdiag;        // N: diagonal of mass matrix M
+		bool     msMatricesDirty = true;  // rebuild A + Cholesky on next step
+		float    msLastH         = -1f;   // h used when matrices were last built
+		float    msLastStiffness = -1f;   // springStiffness used when matrices were last built
+		float    msLastShapeStiffness = -1f; // shapeStiffness used when matrices were last built
+		float    msLastMass      = -1f;   // nodeMass used when matrices were last built
+		int      msLastDraggingJoint = -1; // draggingJoint used when matrices were last built
+		Matrix4x4 msPrevLocalToWorld;     // to track whole-object movement
 
 		// Lasso Joints: indices of joints that are pinned (non-interactable)
 		HashSet<int> pinnedJoints   = new HashSet<int>();
@@ -398,6 +502,8 @@ namespace mattatz.TeddySystem.Example {
 					}
 				}
 
+				dt = Mathf.Min(dt, 0.03f); // cap timestep for stability
+
 				for(int i = 0; i < worldJoints.Count; i++) {
 					// Pinned joints are frozen at their rest position – skip all dynamics
 					if (pinnedJoints.Contains(i)) {
@@ -437,6 +543,7 @@ namespace mattatz.TeddySystem.Example {
 
 				if (restLengths != null && boneIndices != null) {
 					int iterations = 30; // lower for performance on multiple puppets
+					float scale = transform.lossyScale.x;
 					for (int it = 0; it < iterations; it++) {
 						for (int i = 0; i < boneIndices.Count; i++) {
 							int i0 = boneIndices[i].x;
@@ -448,7 +555,8 @@ namespace mattatz.TeddySystem.Example {
 							float currentLen = delta.magnitude;
 							if (currentLen < 0.0001f) continue;
 							
-							float diff = (currentLen - restLengths[i]) / currentLen;
+							float worldRestLength = restLengths[i] * scale;
+							float diff = (currentLen - worldRestLength) / currentLen;
 							Vector3 offset = delta * 0.5f * diff;
 							
 							if (i0 == draggingJoint) {
@@ -495,9 +603,11 @@ namespace mattatz.TeddySystem.Example {
 					col.sharedMesh = mesh;
 				}
 			} else {
+				// Physics off: freeze all joints at rest positions
 				for(int i=0; i<joints.Count; i++) {
 					if (i != draggingJoint) worldJoints[i] = transform.TransformPoint(restLocalPositions[i]);
 					joints[i] = restLocalPositions[i];
+					prevWorldJoints[i] = worldJoints[i];
 				}
 			}
 		}
@@ -673,6 +783,18 @@ namespace mattatz.TeddySystem.Example {
 
 		public Vector3 dragOffsetWorld;
 
+		/// <summary>Returns the index of the joint closest to a given world position.</summary>
+		public int GetClosestJoint(Vector3 worldPos) {
+			if (worldJoints == null || worldJoints.Count == 0) return -1;
+			int bestIdx = -1;
+			float minD = float.MaxValue;
+			for (int i = 0; i < worldJoints.Count; i++) {
+				float d = Vector3.Distance(worldJoints[i], worldPos);
+				if (d < minD) { minD = d; bestIdx = i; }
+			}
+			return bestIdx;
+		}
+
 		public bool TryPickJoint(Camera cam, Vector2 mousePos, float pixelRadius, out int jointIndex) {
 			jointIndex = -1;
 			if (joints == null || joints.Count == 0) return false;
@@ -767,6 +889,7 @@ namespace mattatz.TeddySystem.Example {
 			restLocalPositions.RemoveAt(idx);
 			worldJoints.RemoveAt(idx);
 			prevWorldJoints.RemoveAt(idx);
+			
 
 			// 6. Rebuild jointRegion (simple sequential copy, skip removed index)
 			if (jointRegion != null) {
@@ -803,6 +926,7 @@ namespace mattatz.TeddySystem.Example {
 				}
 			}
 
+			msMatricesDirty = true;  // topology changed – rebuild solver matrices
 			RebuildSkeletonBones();
 		}
 
@@ -816,6 +940,7 @@ namespace mattatz.TeddySystem.Example {
 				if ((bi.x == i0 && bi.y == i1) || (bi.x == i1 && bi.y == i0)) return;
 			boneIndices.Add(new Vector2Int(i0, i1));
 			restLengths.Add(Vector3.Distance(joints[i0], joints[i1]));
+			msMatricesDirty = true;  // topology changed – rebuild solver matrices
 			RebuildSkeletonBones();
 		}
 
@@ -879,6 +1004,7 @@ namespace mattatz.TeddySystem.Example {
 				}
 				// else: already in a prior region — leave untouched
 			}
+			msMatricesDirty = true;  // pinned set changed – rebuild system matrix
 			return newRegion;
 		}
 
@@ -910,6 +1036,7 @@ namespace mattatz.TeddySystem.Example {
 			regionDamping.Clear();
 			if (jointRegion != null)
 				for (int i = 0; i < jointRegion.Length; i++) jointRegion[i] = -1;
+			msMatricesDirty = true;  // pinned set cleared – rebuild system matrix
 		}
 
 		/// <summary>Even-odd ray cast point-in-polygon test (2-D screen space).</summary>
@@ -959,6 +1086,11 @@ namespace mattatz.TeddySystem.Example {
 			for (int i = 0; i < joints.Count; i++) jointRegion[i] = -1;
 			regionStiffness.Clear();
 			regionDamping.Clear();
+
+			// Initialise solver velocity buffer (zero initial velocities)
+			msVelocities = new double[3 * joints.Count];
+			msMatricesDirty = true;
+			msPrevLocalToWorld = transform.localToWorldMatrix;
 
 			skinning = new HarmonicSkinning(filter.sharedMesh.vertices, filter.sharedMesh.triangles, skeletonBones);
 		}
@@ -1057,6 +1189,300 @@ namespace mattatz.TeddySystem.Example {
 			return result;
 		}
 
+		// ══════════════════════════════════════════════════════════════════════
+		// Fast Mass-Spring Solver – Liu et al. 2013
+		// "Fast Simulation of Mass-Spring Systems", SIGGRAPH Asia 2013
+		// ══════════════════════════════════════════════════════════════════════
+
+		/// <summary>
+		/// Algorithm 1 – Construct matrices L, J, M and precompute A = M + h²L.
+		/// Also performs Cholesky factorisation of A for the global step.
+		/// Called once after topology or timestep changes (msMatricesDirty).
+		/// </summary>
+		void BuildMassSpringMatrices(float h) {
+			int n = worldJoints.Count;
+			int s = boneIndices.Count;
+			if (n == 0 || s == 0) return;
+
+			int N = 3 * n;   // total DOFs
+			int S = 3 * s;   // spring DOF count
+			double h2 = (double)h * h;
+			double k  = (double)springStiffness;
+			double m  = (double)nodeMass;
+
+			// ── Initialise arrays ────────────────────────────────────────────────
+			msL    = new double[N * N];   // Laplacian (symmetric, sparse)
+			msJ    = new double[N * S];   // Incidence matrix
+			msMdiag = new double[N];       // Diagonal of mass matrix M
+			msD    = new double[S];        // Spring direction vectors (updated each local step)
+
+			// ── Ensure velocity buffer matches current joint count ───────────────
+			if (msVelocities == null || msVelocities.Length != N)
+				msVelocities = new double[N];
+
+			// ── Mass matrix M (diagonal) ─────────────────────────────────────────
+			for (int i = 0; i < n; i++)
+				for (int d = 0; d < 3; d++)
+					msMdiag[3*i + d] = m;
+
+			// ── Laplacian L and incidence matrix J (Algorithm 1) ─────────────────
+			// For each spring k connecting nodes (i, j):
+			//   L[3i+d, 3i+d] += k_k,  L[3j+d, 3j+d] += k_k
+			//   L[3i+d, 3j+d] -= k_k,  L[3j+d, 3i+d] -= k_k
+			//   J[3i+d, 3k+d] += k_k,  J[3j+d, 3k+d] -= k_k
+			for (int sk = 0; sk < s; sk++) {
+				int ni = boneIndices[sk].x;
+				int nj = boneIndices[sk].y;
+				for (int d = 0; d < 3; d++) {
+					int ri = 3*ni + d;
+					int rj = 3*nj + d;
+					// Laplacian entries
+					msL[ri*N + ri] += k;
+					msL[rj*N + rj] += k;
+					msL[ri*N + rj] -= k;
+					msL[rj*N + ri] -= k;
+					// Incidence entries
+					int csk = 3*sk + d;
+					msJ[ri*S + csk] += k;
+					msJ[rj*S + csk] -= k;
+				}
+			}
+
+			// ── A = M + h²L + h²K_shape ──────────────────────────────────────────
+			double k_shape = (double)shapeStiffness * 500.0;
+			msA = new double[N * N];
+			for (int r = 0; r < N; r++)
+				for (int c = 0; c < N; c++)
+					msA[r*N + c] = (r == c ? msMdiag[r] + h2 * k_shape : 0.0) + h2 * msL[r*N + c];
+
+			// ── Enforce pinned joints via row/col elimination ─────────────────────
+			// Set diagonal = 1, all off-diagonal entries in that row/col = 0.
+			// RHS will be set to the target position during GlobalStep.
+			foreach (int pi in pinnedJoints) {
+				for (int d = 0; d < 3; d++) {
+					int row = 3*pi + d;
+					for (int c = 0; c < N; c++) { msA[row*N + c] = 0.0; msA[c*N + row] = 0.0; }
+					msA[row*N + row] = 1.0;
+				}
+			}
+			// Dragging joint treated similarly (its position is externally driven)
+			if (draggingJoint >= 0 && draggingJoint < n) {
+				for (int d = 0; d < 3; d++) {
+					int row = 3*draggingJoint + d;
+					for (int c = 0; c < N; c++) { msA[row*N + c] = 0.0; msA[c*N + row] = 0.0; }
+					msA[row*N + row] = 1.0;
+				}
+			}
+
+			// ── Precompute Cholesky factorisation of A ───────────────────────────
+			msCholeskyL = new double[N * N];
+			bool ok = CholeskyDecompose(msA, msCholeskyL, N);
+			if (!ok) {
+				// Fallback: add regularisation and retry
+				for (int r = 0; r < N; r++) msA[r*N + r] += 1e-6;
+				CholeskyDecompose(msA, msCholeskyL, N);
+			}
+
+			msMatricesDirty = false;
+			msLastH         = h;
+			msLastStiffness = springStiffness;
+			msLastShapeStiffness = shapeStiffness;
+			msLastMass      = nodeMass;
+			msLastDraggingJoint = draggingJoint;
+		}
+
+		/// <summary>
+		/// Run one complete mass-spring timestep:
+		/// solverIterations × (Local Step + Global Step).
+		/// </summary>
+		void MassSpringStep(float h) {
+			int n = worldJoints.Count;
+			if (n == 0 || msCholeskyL == null) return;
+
+			double h2 = (double)h * h;
+
+			// Copy world positions into a working flat array x (3n)
+			double[] x = new double[3*n];
+			for (int i = 0; i < n; i++) {
+				x[3*i]   = worldJoints[i].x;
+				x[3*i+1] = worldJoints[i].y;
+				x[3*i+2] = worldJoints[i].z;
+			}
+
+			// ── Compute inertia prediction y = x_n + h*v + h²*f_ext/m ───────────
+			// Gravity acts as external force in -y direction
+			double[] y = new double[3*n];
+			for (int i = 0; i < n; i++) {
+				y[3*i]   = x[3*i]   + h * msVelocities[3*i];
+				y[3*i+1] = x[3*i+1] + h * msVelocities[3*i+1] - h2 * gravity;
+				y[3*i+2] = x[3*i+2] + h * msVelocities[3*i+2];
+			}
+
+			// ── Fixed-iteration local/global loop (Algorithm 4) ──────────────────
+			int iters = Mathf.Max(1, solverIterations);
+			for (int iter = 0; iter < iters; iter++) {
+				// Local step: update spring direction vectors d (Algorithm 2)
+				LocalStep(x);
+				// Global step: solve (M + h²L)x = h²Jd + My (Algorithm 3)
+				GlobalStep(x, y, h2);
+			}
+
+			// ── Apply damping and update velocities v = (x_new - x_old) / h ─────
+			double dampFactor = 1.0 - (double)damping;
+			for (int i = 0; i < n; i++) {
+				if (pinnedJoints.Contains(i) || i == draggingJoint) {
+					msVelocities[3*i]   = 0;
+					msVelocities[3*i+1] = 0;
+					msVelocities[3*i+2] = 0;
+					continue;
+				}
+				msVelocities[3*i]   = dampFactor * (x[3*i]   - worldJoints[i].x) / h;
+				msVelocities[3*i+1] = dampFactor * (x[3*i+1] - worldJoints[i].y) / h;
+				msVelocities[3*i+2] = dampFactor * (x[3*i+2] - worldJoints[i].z) / h;
+			}
+
+			// ── Write solved positions back to worldJoints ────────────────────────
+			for (int i = 0; i < n; i++) {
+				if (pinnedJoints.Contains(i)) continue;  // pinned joints handled separately
+				if (i == draggingJoint)       continue;  // dragging joint driven externally
+				worldJoints[i] = new Vector3((float)x[3*i], (float)x[3*i+1], (float)x[3*i+2]);
+			}
+		}
+
+		/// <summary>
+		/// Algorithm 2 – Local step: compute spring direction vectors d.
+		/// For each spring k connecting (i, j):
+		///   d_k = r_k * normalize(p_i - p_j)
+		/// where r_k is the rest length.
+		/// </summary>
+		void LocalStep(double[] x) {
+			int s = boneIndices.Count;
+			for (int sk = 0; sk < s; sk++) {
+				int ni = boneIndices[sk].x;
+				int nj = boneIndices[sk].y;
+
+				// Displacement vector p12 = p_i - p_j
+				double dx = x[3*ni]   - x[3*nj];
+				double dy = x[3*ni+1] - x[3*nj+1];
+				double dz = x[3*ni+2] - x[3*nj+2];
+				double len = System.Math.Sqrt(dx*dx + dy*dy + dz*dz);
+
+				// Normalise and scale by rest length r_k
+				double r = (double)restLengths[sk];
+				if (len > 1e-10) {
+					double scale = r / len;
+					msD[3*sk]   = dx * scale;
+					msD[3*sk+1] = dy * scale;
+					msD[3*sk+2] = dz * scale;
+				} else {
+					// Degenerate: spring fully collapsed – use rest direction (0,r,0)
+					msD[3*sk]   = 0;
+					msD[3*sk+1] = r;
+					msD[3*sk+2] = 0;
+				}
+			}
+		}
+
+		/// <summary>
+		/// Algorithm 3 – Global step: solve the linear system
+		///   (M + h²L) x = h²·J·d + M·y
+		/// using the precomputed Cholesky factorisation.
+		/// Pinned and dragged joint rows are overridden with their target positions.
+		/// </summary>
+		void GlobalStep(double[] x, double[] y, double h2) {
+			int n = worldJoints.Count;
+			int N = 3 * n;
+			int s = boneIndices.Count;
+			int S = 3 * s;
+
+			// ── Compute RHS = h²·J·d + M·y + h²·K_shape·target ──────────────────
+			// (equivalent to h²Jd - b where b = -My, see thesis eq.)
+			double[] rhs = new double[N];
+			double k_shape = (double)shapeStiffness * 500.0;
+			// Add M·y contribution and soft shape-matching anchors
+			for (int i = 0; i < n; i++) {
+				Vector3 target = transform.TransformPoint(restLocalPositions[i]);
+				for (int d = 0; d < 3; d++) {
+					int r = 3*i + d;
+					rhs[r] = msMdiag[r] * y[r];
+					// Soft anchor to rest frame (provides global stability and jiggle when dragging)
+					rhs[r] += h2 * k_shape * (d == 0 ? target.x : (d == 1 ? target.y : target.z));
+				}
+			}
+			// Add h²·J·d contribution (J is N×S)
+			for (int r = 0; r < N; r++)
+				for (int c = 0; c < S; c++)
+					rhs[r] += h2 * msJ[r*S + c] * msD[c];
+
+			// ── Override RHS for pinned joints ───────────────────────────────────
+			foreach (int pi in pinnedJoints) {
+				Vector3 target = transform.TransformPoint(restLocalPositions[pi]);
+				rhs[3*pi]   = target.x;
+				rhs[3*pi+1] = target.y;
+				rhs[3*pi+2] = target.z;
+			}
+			// Override RHS for dragged joint
+			if (draggingJoint >= 0 && draggingJoint < n) {
+				rhs[3*draggingJoint]   = worldJoints[draggingJoint].x;
+				rhs[3*draggingJoint+1] = worldJoints[draggingJoint].y;
+				rhs[3*draggingJoint+2] = worldJoints[draggingJoint].z;
+			}
+
+			// ── Solve A·x_new = rhs using Cholesky L·L^T ────────────────────────
+			double[] result = new double[N];
+			SolveCholesky(msCholeskyL, rhs, N, result);
+
+			// Write result back into x
+			System.Array.Copy(result, x, N);
+		}
+
+		/// <summary>
+		/// Cholesky-Banachiewicz decomposition: A = L·L^T (in-place into output).
+		/// A must be symmetric positive definite (N×N, row-major).
+		/// Returns false if decomposition fails (non-SPD matrix).
+		/// </summary>
+		static bool CholeskyDecompose(double[] A, double[] L, int N) {
+			System.Array.Clear(L, 0, N * N);
+			for (int i = 0; i < N; i++) {
+				for (int j = 0; j <= i; j++) {
+					double sum = A[i*N + j];
+					for (int kk = 0; kk < j; kk++)
+						sum -= L[i*N + kk] * L[j*N + kk];
+					if (i == j) {
+						if (sum <= 0.0) return false;  // not SPD
+						L[i*N + j] = System.Math.Sqrt(sum);
+					} else {
+						L[i*N + j] = sum / L[j*N + j];
+					}
+				}
+			}
+			return true;
+		}
+
+		/// <summary>
+		/// Solve A·x = b where A = L·L^T (Cholesky) using forward/back substitution.
+		/// L is the lower-triangular Cholesky factor (N×N, row-major).
+		/// </summary>
+		static void SolveCholesky(double[] L, double[] b, int N, double[] x) {
+			// Forward substitution: solve L·y = b
+			double[] tmp = new double[N];
+			for (int i = 0; i < N; i++) {
+				double sum = b[i];
+				for (int j = 0; j < i; j++)
+					sum -= L[i*N + j] * tmp[j];
+				double diag = L[i*N + i];
+				tmp[i] = (System.Math.Abs(diag) > 1e-15) ? sum / diag : 0.0;
+			}
+			// Back substitution: solve L^T·x = y
+			for (int i = N-1; i >= 0; i--) {
+				double sum = tmp[i];
+				for (int j = i+1; j < N; j++)
+					sum -= L[j*N + i] * x[j];  // L^T[i,j] = L[j,i]
+				double diag = L[i*N + i];
+				x[i] = (System.Math.Abs(diag) > 1e-15) ? sum / diag : 0.0;
+			}
+		}
+
 		static Material lineMaterial;
 		static void CreateLineMaterial() {
 			if (!lineMaterial) {
@@ -1076,78 +1502,57 @@ namespace mattatz.TeddySystem.Example {
 			if (cam == null) return;
 
 			CreateLineMaterial();
-			lineMaterial.SetPass(0);
 
 			GL.PushMatrix();
 			GL.LoadPixelMatrix();
 
-			GL.Begin(GL.LINES);
-			GL.Color(skeletonColor);
 			if (!isAnimationMode) {
+				lineMaterial.SetColor("_Color", skeletonColor);
+				lineMaterial.SetPass(0);
+				GL.Begin(GL.LINES);
 				foreach (var (start, end) in skeletonBones) {
 					Vector3 ws = cam.WorldToScreenPoint(transform.TransformPoint(start));
 					Vector3 we = cam.WorldToScreenPoint(transform.TransformPoint(end));
 					if (ws.z < 0f || we.z < 0f) continue;
-					GL.Vertex3(ws.x, Screen.height - ws.y, 0f);
-					GL.Vertex3(we.x, Screen.height - we.y, 0f);
+					GL.Vertex3(ws.x, ws.y, 0f);
+					GL.Vertex3(we.x, we.y, 0f);
 				}
+				GL.End();
 			}
 			
 			// Draw Animation Paths
 			if (isAnimationMode && recordedMotions != null && recordedMotions.Count > 0) {
-				GL.End();
-				lineMaterial.SetColor("_Color", new Color(0.2f, 0.2f, 0.2f, 0.8f)); // Dark gray curves
-				lineMaterial.SetPass(0);
-				GL.Begin(GL.LINES);
+				if (animBrushTex == null) CreateAnimBrush();
+				animBrushMat.SetPass(0);
+				GL.Begin(GL.QUADS);
+				GL.Color(animPathColor);
+				
+				float dabSize = animPathBrushSize;
+				float spacing = Mathf.Max(0.5f, dabSize * 0.7f); // Adjust spacing dynamically to ensure smooth trails
+
 				foreach (var kvp in recordedMotions) {
 					var path = kvp.Value;
-					for (int i = 0; i < path.Count - 1; i++) {
-						Vector3 p0 = cam.WorldToScreenPoint(path[i]);
-						Vector3 p1 = cam.WorldToScreenPoint(path[i + 1]);
-						if (p0.z > 0f && p1.z > 0f) {
-							GL.Vertex3(p0.x, Screen.height - p0.y, 0f);
-							GL.Vertex3(p1.x, Screen.height - p1.y, 0f);
-						}
-					}
-					if (path.Count > 1 && animMaxFrames > 0 && (!isRecordingAnim || kvp.Key != animSelectedJoint)) {
-						Vector3 p0 = cam.WorldToScreenPoint(path[path.Count - 1]);
-						Vector3 p1 = cam.WorldToScreenPoint(path[0]);
-						if (p0.z > 0f && p1.z > 0f) {
-							GL.Vertex3(p0.x, Screen.height - p0.y, 0f);
-							GL.Vertex3(p1.x, Screen.height - p1.y, 0f);
-						}
-					}
+					DrawPathWithSoftBrush(path, cam, dabSize, spacing, animMaxFrames > 0 && (!isRecordingAnim || kvp.Key != animSelectedJoint));
 				}
+				GL.End();
 			}
 			
 			// Draw Blue Animation Paths
 			if (isAnimationMode && blueRecordedMotions != null && blueRecordedMotions.Count > 0) {
-				GL.End();
-				lineMaterial.SetColor("_Color", new Color(0.2f, 0.2f, 0.8f, 0.8f)); // Dark blue curves
-				lineMaterial.SetPass(0);
-				GL.Begin(GL.LINES);
+				if (animBrushTex == null) CreateAnimBrush();
+				animBrushMat.SetPass(0);
+				GL.Begin(GL.QUADS);
+				GL.Color(animBluePathColor);
+				
+				float dabSize = animPathBrushSize;
+				float spacing = Mathf.Max(0.5f, dabSize * 0.7f); // Adjust spacing dynamically to ensure smooth trails
+
 				foreach (var kvp in blueRecordedMotions) {
 					var path = kvp.Value;
-					for (int i = 0; i < path.Count - 1; i++) {
-						Vector3 p0 = cam.WorldToScreenPoint(path[i]);
-						Vector3 p1 = cam.WorldToScreenPoint(path[i + 1]);
-						if (p0.z > 0f && p1.z > 0f) {
-							GL.Vertex3(p0.x, Screen.height - p0.y, 0f);
-							GL.Vertex3(p1.x, Screen.height - p1.y, 0f);
-						}
-					}
-					if (path.Count > 1 && animMaxFrames > 0 && (!isRecordingAnim || kvp.Key != animSelectedBluePoint)) {
-						Vector3 p0 = cam.WorldToScreenPoint(path[path.Count - 1]);
-						Vector3 p1 = cam.WorldToScreenPoint(path[0]);
-						if (p0.z > 0f && p1.z > 0f) {
-							GL.Vertex3(p0.x, Screen.height - p0.y, 0f);
-							GL.Vertex3(p1.x, Screen.height - p1.y, 0f);
-						}
-					}
+					DrawPathWithSoftBrush(path, cam, dabSize, spacing, animMaxFrames > 0 && (!isRecordingAnim || kvp.Key != animSelectedBluePoint));
 				}
+				GL.End();
 			}
-			
-			GL.End();
 
 			// Draw Blue points
 			if (isAnimationMode && bluePoints != null) {
@@ -1156,16 +1561,15 @@ namespace mattatz.TeddySystem.Example {
 					Vector3 ws = cam.WorldToScreenPoint(wPos);
 					if (ws.z < 0f) continue;
 					bool isControlPoint = blueRecordedMotions.ContainsKey(i) || i == animSelectedBluePoint;
-					GL.End();
+					
 					lineMaterial.SetColor("_Color", isControlPoint ? Color.blue : new Color(0.4f, 0.4f, 0.9f, 0.5f));
 					lineMaterial.SetPass(0);
 					GL.Begin(GL.TRIANGLES);
-					DrawFilledDisc(ws.x, Screen.height - ws.y, isControlPoint ? jointRadius * 1.5f : jointRadius * 0.7f, 16);
+					DrawFilledDisc(ws.x, ws.y, isControlPoint ? jointRadius * 1.5f : jointRadius * 0.7f, 16);
+					GL.End();
 				}
 			}
 
-			GL.Begin(GL.TRIANGLES);
-			GL.Color(skeletonColor);
 			if (worldJoints != null) {
 				for (int i = 0; i < worldJoints.Count; i++) {
 					Vector3 ws = cam.WorldToScreenPoint(worldJoints[i]);
@@ -1173,11 +1577,12 @@ namespace mattatz.TeddySystem.Example {
 
 					if (isAnimationMode) {
 						bool isControlPoint = recordedMotions.ContainsKey(i) || i == animSelectedJoint;
-						GL.End();
+						
 						lineMaterial.SetColor("_Color", isControlPoint ? Color.red : new Color(0.6f, 0.6f, 0.6f, 0.4f));
 						lineMaterial.SetPass(0);
 						GL.Begin(GL.TRIANGLES);
-						DrawFilledDisc(ws.x, Screen.height - ws.y, isControlPoint ? jointRadius * 1.5f : jointRadius * 0.7f, 16);
+						DrawFilledDisc(ws.x, ws.y, isControlPoint ? jointRadius * 1.5f : jointRadius * 0.7f, 16);
+						GL.End();
 						continue;
 					}
 
@@ -1185,42 +1590,33 @@ namespace mattatz.TeddySystem.Example {
 
 					if (i == rigEditSelectedJoint && i != draggingJoint) {
 						// Yellow highlight for selected joint in Rig Edit mode
-						GL.End();
 						lineMaterial.SetColor("_Color", Color.yellow);
 						lineMaterial.SetPass(0);
 						GL.Begin(GL.TRIANGLES);
-						DrawFilledDisc(ws.x, Screen.height - ws.y, jointRadius * 1.8f, 16);
+						DrawFilledDisc(ws.x, ws.y, jointRadius * 1.8f, 16);
 						GL.End();
-						lineMaterial.SetColor("_Color", skeletonColor);
-						lineMaterial.SetPass(0);
-						GL.Begin(GL.TRIANGLES);
 					} else if (i == draggingJoint) {
-						GL.End();
 						lineMaterial.SetColor("_Color", Color.yellow);
 						lineMaterial.SetPass(0);
 						GL.Begin(GL.TRIANGLES);
-						DrawFilledDisc(ws.x, Screen.height - ws.y, jointRadius * 1.5f, 16);
+						DrawFilledDisc(ws.x, ws.y, jointRadius * 1.5f, 16);
 						GL.End();
-						lineMaterial.SetColor("_Color", skeletonColor);
-						lineMaterial.SetPass(0);
-						GL.Begin(GL.TRIANGLES);
 					} else if (isPinned) {
 						// Gray pinned joint
-						GL.End();
 						lineMaterial.SetColor("_Color", new Color(0.45f, 0.45f, 0.45f, 1f));
 						lineMaterial.SetPass(0);
 						GL.Begin(GL.TRIANGLES);
-						DrawFilledDisc(ws.x, Screen.height - ws.y, jointRadius, 16);
+						DrawFilledDisc(ws.x, ws.y, jointRadius, 16);
 						GL.End();
+					} else {
 						lineMaterial.SetColor("_Color", skeletonColor);
 						lineMaterial.SetPass(0);
 						GL.Begin(GL.TRIANGLES);
-					} else {
-						DrawFilledDisc(ws.x, Screen.height - ws.y, jointRadius, 16);
+						DrawFilledDisc(ws.x, ws.y, jointRadius, 16);
+						GL.End();
 					}
 				}
 			}
-			GL.End();
 			GL.PopMatrix();
 		}
 

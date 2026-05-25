@@ -363,7 +363,7 @@ namespace mattatz.TeddySystem.Example {
 		}
 
 		void OnRenderObject () {
-			if(teddy == null) return;
+			if(teddy == null || lineMat == null) return;
 
 			if(teddy.triangulation != null) {
 				lineMat.SetColor("_Color", Color.black);
@@ -396,8 +396,8 @@ namespace mattatz.TeddySystem.Example {
 				Vector3 we = cam.WorldToScreenPoint(transform.TransformPoint(end));
 				if (ws.z < 0f || we.z < 0f) continue;
 
-				float sx = ws.x, sy = Screen.height - ws.y;
-				float ex = we.x, ey = Screen.height - we.y;
+				float sx = ws.x, sy = ws.y;
+				float ex = we.x, ey = we.y;
 
 				GL.Vertex3(sx, sy, 0f);
 				GL.Vertex3(ex, ey, 0f);
@@ -413,7 +413,7 @@ namespace mattatz.TeddySystem.Example {
 				for (int i = 0; i < joints.Count; i++) {
 					Vector3 ws = cam.WorldToScreenPoint(transform.TransformPoint(joints[i]));
 					if (ws.z < 0f) continue;
-					float sx = ws.x, sy = Screen.height - ws.y;
+					float sx = ws.x, sy = ws.y;
 
 					if (i == draggingJoint) {
 						GL.End();

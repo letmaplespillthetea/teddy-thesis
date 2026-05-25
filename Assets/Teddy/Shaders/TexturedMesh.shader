@@ -2,6 +2,7 @@ Shader "Custom/TexturedMesh"
 {
     Properties
     {
+        _Color ("Main Color", Color) = (1,1,1,1)
         _MainTex ("Main Texture", 2D) = "white" {}
         _UseShading ("Use Shading", Float) = 1.0
         _Smoothness ("Smoothness", Range(0, 1)) = 0.8
@@ -24,6 +25,7 @@ Shader "Custom/TexturedMesh"
             #include "AutoLight.cginc"
             #include "Lighting.cginc"
 
+            fixed4 _Color;
             sampler2D _MainTex;
             float4 _MainTex_ST;
             float _UseShading;
@@ -64,7 +66,7 @@ Shader "Custom/TexturedMesh"
 
             fixed4 frag(v2f i) : SV_Target
             {
-                fixed4 texColor = tex2D(_MainTex, i.uv);
+                fixed4 texColor = tex2D(_MainTex, i.uv) * _Color;
                 
                 if (_UseShading > 0.0)
                 {
@@ -74,25 +76,25 @@ Shader "Custom/TexturedMesh"
                     // Get light direction from main light
                     float3 lightDir = normalize(_WorldSpaceLightPos0.xyz);
                     
-                    // Calculate diffuse
-                    float diffuseFactor = max(dot(normal, lightDir), 0.0);
+                    // Calculate diffuse (Half-Lambert for cartoon/vibrant style, avoids dark shadows)
+                    float diffuseFactor = dot(normal, lightDir) * 0.5 + 0.5;
                     float shadow = SHADOW_ATTENUATION(i);
                     
                     // Combine diffuse with shadow
                     float3 diffuse = diffuseFactor * _LightColor0.rgb * shadow;
                     
-                    // Add ambient light
-                    float3 ambient = ShadeSH9(float4(normal, 1));
+                    // Add ambient light with a minimum floor to keep it bright and clear
+                    float3 ambient = max(ShadeSH9(float4(normal, 1)), float3(0.7, 0.7, 0.7));
                     
                     // Calculate specular (Blinn-Phong)
                     float3 halfDir = normalize(lightDir + i.viewDir);
                     float specFactor = pow(max(dot(normal, halfDir), 0.0), (1.0 - _Smoothness) * 100.0);
                     float3 specular = specFactor * _LightColor0.rgb * _SpecIntensity * shadow;
                     
-                    // Final lighting - smoother blending
+                    // Final lighting
                     float3 lighting = diffuse + ambient + specular;
                     
-                    return texColor * float4(lighting * 0.85 + float3(0.15, 0.15, 0.15), 1.0);
+                    return texColor * float4(lighting, 1.0);
                 }
                 else
                 {
