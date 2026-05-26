@@ -1522,7 +1522,7 @@ void BuildWithDomainStitching () {
 				System.Array.Clear(sketchPixels, 0, sketchPixels.Length);
 
 				Color32 strokeColor = new Color32(0, 0, 0, 255); // Black for active sketch
-				Color32 accumColor = new Color32(0, 0, 0, 102);  // Semi-transparent black (0.4f alpha) for accumulated sketches
+				Color32 accumColor = new Color32(0, 0, 0, 255);  // Fully opaque black for accumulated sketches
 
 				// 1. Draw accumulated multipart contours
 				foreach (var contour in multiPartContours) {
