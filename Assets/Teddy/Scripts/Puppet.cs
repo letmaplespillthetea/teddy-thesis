@@ -625,6 +625,20 @@ namespace mattatz.TeddySystem.Example {
 			}
 		}
 
+		public void CommitEditMode() {
+			if (mainTexture != null && appliedPixels != null) {
+				mainTexture.SetPixels32(appliedPixels);
+				mainTexture.Apply();
+				UpdateDominantColor(appliedPixels, mainTexture);
+			}
+			backupPixels = null;
+			appliedPixels = null;
+			currentWorkingPixels = null;
+			previewRegionIndices = null;
+			boundaryIndices = null;
+			isPreviewingColor = false;
+		}
+
 		public void ApplyColorToLastClick(Color32 newColor) { 
 			if (mainTexture == null || previewRegionIndices == null || previewRegionIndices.Count == 0) return;
 			// Commit only the filled color, NOT the orange boundary outline!
@@ -1300,6 +1314,16 @@ namespace mattatz.TeddySystem.Example {
 		public void PaintOnSurface(RaycastHit hit, Color32 brushColor, float brushSize) {
 			if (mainTexture == null) {
 				CreateDefaultTexture();
+			} else {
+				if (appliedPixels == null || appliedPixels.Length == 0) {
+					appliedPixels = mainTexture.GetPixels32();
+				}
+				if (currentWorkingPixels == null || currentWorkingPixels.Length == 0) {
+					currentWorkingPixels = mainTexture.GetPixels32();
+				}
+				if (backupPixels == null || backupPixels.Length == 0) {
+					backupPixels = mainTexture.GetPixels32();
+				}
 			}
 
 			Mesh mesh = filter.sharedMesh;

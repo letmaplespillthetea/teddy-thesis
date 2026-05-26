@@ -1567,7 +1567,7 @@ void BuildWithDomainStitching () {
 			if (GUI.Button(new Rect(Screen.width - 200, startY + 30, 180, 24), "Done", style)) {
 				isEditMode = false;
 				if (mode == OperationMode.DrawOnSurface) mode = OperationMode.Default;
-				if (activePuppet != null) activePuppet.CancelEditMode();
+				if (activePuppet != null) activePuppet.CommitEditMode();
 			}
 
 			// Color wheel
