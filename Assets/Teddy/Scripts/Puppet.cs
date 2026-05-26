@@ -1104,10 +1104,15 @@ namespace mattatz.TeddySystem.Example {
 				Vector2[] uvs = new Vector2[vertices.Length];
 				Bounds bounds = mesh.bounds;
 				for (int i = 0; i < vertices.Length; i++) {
-					// Map X/Y coordinates to 0-1 range based on bounds
-					float u = (vertices[i].x - bounds.min.x) / bounds.size.x;
-					float v = (vertices[i].y - bounds.min.y) / bounds.size.y;
-					uvs[i] = new Vector2(u, v);
+					// Map X/Y coordinates to 0-1 range based on bounds, splitting front/back horizontally
+					float u = bounds.size.x > 0 ? (vertices[i].x - bounds.min.x) / bounds.size.x : 0.5f;
+					float v = bounds.size.y > 0 ? (vertices[i].y - bounds.min.y) / bounds.size.y : 0.5f;
+					if (vertices[i].z <= 0.01f) {
+						u = u * 0.5f;
+					} else {
+						u = 0.5f + u * 0.5f;
+					}
+					uvs[i] = new Vector2(Mathf.Clamp01(u), Mathf.Clamp01(v));
 				}
 				mesh.uv = uvs;
 			}
@@ -1782,6 +1787,11 @@ namespace mattatz.TeddySystem.Example {
 				Vector3 v = vertices[i];
 				float u = bounds.size.x > 0 ? (v.x - bounds.min.x) / bounds.size.x : 0.5f;
 				float v_coord = bounds.size.y > 0 ? (v.y - bounds.min.y) / bounds.size.y : 0.5f;
+				if (v.z <= 0.01f) {
+					u = u * 0.5f;
+				} else {
+					u = 0.5f + u * 0.5f;
+				}
 				uvs[i] = new Vector2(Mathf.Clamp01(u), Mathf.Clamp01(v_coord));
 			}
 			mesh.uv = uvs;
@@ -1793,6 +1803,11 @@ namespace mattatz.TeddySystem.Example {
 			Bounds bounds = mesh.bounds;
 			float u = bounds.size.x > 0 ? (localPoint.x - bounds.min.x) / bounds.size.x : 0.5f;
 			float v = bounds.size.y > 0 ? (localPoint.y - bounds.min.y) / bounds.size.y : 0.5f;
+			if (localPoint.z <= 0.01f) {
+				u = u * 0.5f;
+			} else {
+				u = 0.5f + u * 0.5f;
+			}
 			return new Vector2(Mathf.Clamp01(u), Mathf.Clamp01(v));
 		}
 
