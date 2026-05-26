@@ -137,6 +137,21 @@ namespace mattatz.TeddySystem.Example {
             cholDirty = true;
         }
 
+        public void UpdateSpringStiffnesses(float[] stiffnesses) {
+            if (stiffnesses == null || stiffnesses.Length != s) return;
+            bool changed = false;
+            for (int k = 0; k < s; k++) {
+                if (Mathf.Abs(kk[k] - stiffnesses[k]) > 1e-5f) {
+                    kk[k] = stiffnesses[k];
+                    changed = true;
+                }
+            }
+            if (changed) {
+                BuildBaseMatrices();
+                cholDirty = true;
+            }
+        }
+
         /// <summary>
         /// One simulation step.
         /// </summary>
@@ -147,13 +162,15 @@ namespace mattatz.TeddySystem.Example {
         /// <param name="forcedPositions">World positions for each forced joint.</param>
         /// <param name="restPositions">Rest (natural) world positions for each joint. May be null (disables restoring force).</param>
         /// <param name="restStiffness">Stiffness of the Hooke restoring force pulling each free joint back to its rest position.</param>
+        /// <param name="dampingPerJoint">Optional per-joint damping array. If provided, overrides the global damping parameter.</param>
         public void Step(int     iterations,
                          float   gravityY,
                          float   damping,
                          int[]   forcedIndices,
                          Vector3[] forcedPositions,
                          Vector3[] restPositions  = null,
-                         float   restStiffness    = 0f) {
+                         float   restStiffness    = 0f,
+                         float[] dampingPerJoint  = null) {
 
             // ── Rebuild Cholesky if pinned set changed ─────────────────────────
             if (cholDirty) {
@@ -162,11 +179,20 @@ namespace mattatz.TeddySystem.Example {
             }
 
             // ── 1. Damp velocities ────────────────────────────────────────────
-            float keep = 1f - Mathf.Clamp01(damping);
-            for (int i = 0; i < n; i++) {
-                velX[i] *= keep;
-                velY[i] *= keep;
-                velZ[i] *= keep;
+            if (dampingPerJoint != null && dampingPerJoint.Length == n) {
+                for (int i = 0; i < n; i++) {
+                    float keep = 1f - Mathf.Clamp01(dampingPerJoint[i]);
+                    velX[i] *= keep;
+                    velY[i] *= keep;
+                    velZ[i] *= keep;
+                }
+            } else {
+                float keep = 1f - Mathf.Clamp01(damping);
+                for (int i = 0; i < n; i++) {
+                    velX[i] *= keep;
+                    velY[i] *= keep;
+                    velZ[i] *= keep;
+                }
             }
 
             // ── 2. Inertia target: y = x + h·v + h²·fext/m ────────────────────

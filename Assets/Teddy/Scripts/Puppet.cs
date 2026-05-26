@@ -582,8 +582,29 @@ namespace mattatz.TeddySystem.Example {
 						int[]     fa  = allForced.Count  > 0 ? allForced.ToArray()  : null;
 						Vector3[] fpa = allForcedP.Count > 0 ? allForcedP.ToArray() : null;
 
-						// Pass restStiffness to solver. The property setter will trigger a Cholesky
-						// rebuild if the value changes. This is now fully implicit and stable.
+						// Compute region-specific stiffness and damping for FMS Solver
+						float[] dampingPerJoint = new float[jCount];
+						for (int i = 0; i < jCount; i++) {
+							int r = (jointRegion != null && i < jointRegion.Length) ? jointRegion[i] : -1;
+							dampingPerJoint[i] = (r >= 0 && r < regionDamping.Count) ? regionDamping[r] : damping;
+						}
+
+						if (boneIndices != null) {
+							int sCount = boneIndices.Count;
+							float[] springStiffnesses = new float[sCount];
+							for (int k = 0; k < sCount; k++) {
+								int i0 = boneIndices[k].x;
+								int i1 = boneIndices[k].y;
+								int r0 = (jointRegion != null && i0 < jointRegion.Length) ? jointRegion[i0] : -1;
+								int r1 = (jointRegion != null && i1 < jointRegion.Length) ? jointRegion[i1] : -1;
+								float s0 = (r0 >= 0 && r0 < regionStiffness.Count) ? regionStiffness[r0] : shapeStiffness;
+								float s1 = (r1 >= 0 && r1 < regionStiffness.Count) ? regionStiffness[r1] : shapeStiffness;
+								float avgStiff = (s0 + s1) * 0.5f;
+								springStiffnesses[k] = Mathf.Lerp(100f, springStiffness, avgStiff);
+							}
+							fmsSolver.UpdateSpringStiffnesses(springStiffnesses);
+						}
+
 						fmsSolver.RestStiffness = restStiffness;
 
 						Vector3[] restPosArr = null;
@@ -593,7 +614,7 @@ namespace mattatz.TeddySystem.Example {
 								restPosArr[i] = transform.TransformPoint(restLocalPositions[i]);
 						}
 
-						fmsSolver.Step(solverIterations, -gravity, damping, fa, fpa, restPosArr, restStiffness);
+						fmsSolver.Step(solverIterations, -gravity, damping, fa, fpa, restPosArr, restStiffness, dampingPerJoint);
 
 						// Read back solver positions into worldJoints
 						for (int i = 0; i < jCount; i++) {
@@ -625,8 +646,15 @@ namespace mattatz.TeddySystem.Example {
 									float curLen = delta.magnitude;
 									if (curLen < 1e-6f) continue;
 
+									// Scale PBD correction by the normalized stiffness of this spring
+									int r0 = (jointRegion != null && i0 < jointRegion.Length) ? jointRegion[i0] : -1;
+									int r1 = (jointRegion != null && i1 < jointRegion.Length) ? jointRegion[i1] : -1;
+									float s0 = (r0 >= 0 && r0 < regionStiffness.Count) ? regionStiffness[r0] : shapeStiffness;
+									float s1 = (r1 >= 0 && r1 < regionStiffness.Count) ? regionStiffness[r1] : shapeStiffness;
+									float avgStiff = (s0 + s1) * 0.5f;
+
 									float diff = (curLen - targetLen) / curLen;
-									Vector3 correction = delta * diff;
+									Vector3 correction = delta * diff * Mathf.Pow(avgStiff, 5f);
 
 									// Distribute correction: fixed endpoint takes 0, free takes all
 									bool fixed0 = pin0 || drag0;
@@ -747,11 +775,12 @@ namespace mattatz.TeddySystem.Example {
 			float[] stiffs = new float[s];
 			float   scale  = transform.lossyScale.x;
 
+			float defaultSpringK = Mathf.Lerp(100f, springStiffness, shapeStiffness);
 			for (int k = 0; k < s; k++) {
 				si[k]     = boneIndices[k].x;
 				sj[k]     = boneIndices[k].y;
 				rl[k]     = restLengths[k] * scale;   // world-space rest length
-				stiffs[k] = springStiffness;
+				stiffs[k] = defaultSpringK;
 			}
 
 			fmsSolver       = new FMSSolver(n, s, si, sj, rl, stiffs, nodeMass, fixedTimestep);
