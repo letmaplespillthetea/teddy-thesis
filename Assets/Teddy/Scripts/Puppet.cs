@@ -46,7 +46,7 @@ namespace mattatz.TeddySystem.Example {
 
 		public bool enablePhysics = true;
 		public float shapeStiffness = 0.2f;  // kept for Inspector compatibility
-		public float damping = 0.1f;
+		public float damping = 0.3f;  // velocity damping per step (FMS); 0=undamped, 1=instant stop
 		public float gravity = 0f;
 
 		[Header("Fast Mass-Spring Solver (Liu et al. 2013)")]
@@ -55,9 +55,27 @@ namespace mattatz.TeddySystem.Example {
 		public float springStiffness  = 5000f;   // k_k: spring stiffness coefficient
 		public float nodeMass         = 1f;      // m_i: uniform nodal mass
 		public int   solverIterations = 10;      // local/global iterations per frame
+		[Tooltip("Stiffness of restoring force pulling each free joint back to its rest pose.\n" +
+		         "0 = no restoring (joints stay wherever physics leaves them).\n" +
+		         "Higher = snappier snap-back. Try 50\u2013500.")]
+		public float restStiffness   = 150f;     // k_rest: how strongly joints snap back to rest pose
 		// Fixed simulation timestep h – the precomputed Cholesky is valid as long
 		// as h stays constant. Smaller = more stable, larger = cheaper.
 		public float fixedTimestep    = 1f/60f;  // h for the mass-spring solver
+
+		[Header("FMS Sleep / Wake")]
+		[Tooltip("Solver runs only while awake. Wakes when joint dragged or object moves.\n" +
+		         "Goes to sleep when max velocity² falls below this threshold.")]
+		public float sleepVelocityThreshold = 1e-6f;
+		[Tooltip("Seconds of low-velocity motion before the solver sleeps.")]
+		public float sleepDelay = 0.15f;
+
+		// ── Runtime FMS state (not serialised) ────────────────────────────────
+		FMSSolver fmsSolver;        // null until SetupSkeleton() is called
+		bool   fmsAwake   = false;  // whether solver is currently active
+		float  fmsSleepTimer = 0f;  // countdown before sleeping
+		Vector3 fmsPrevTransformPos;  // detect object movement
+		bool[] fmsPinnedBuffer;       // reused each frame to avoid allocation
 
 		public int draggingJoint = -1;
 		public float dragZ = 0f;
@@ -459,20 +477,15 @@ namespace mattatz.TeddySystem.Example {
 		void Update () {
 			if (joints == null || skinning == null) return;
 			
+			// ── Animation frame advance ──────────────────────────────────────────
 			if (enablePhysics) {
-				float dt = Time.deltaTime;
-				if (dt > 0.1f) dt = 0.1f;
-
 				if (isAnimationPlaying) {
 					animCurrentFrame++;
 					if (animMaxFrames > 0 && animCurrentFrame >= animMaxFrames) {
 						animCurrentFrame = 0;
-						if (isRecordingAnim) {
-							StopRecordingAnimation();
-						}
+						if (isRecordingAnim) StopRecordingAnimation();
 					}
 				}
-
 				if (isRecordingAnim) {
 					if (animSelectedJoint >= 0) {
 						recordedMotions[animSelectedJoint].Add(worldJoints[animSelectedJoint]);
@@ -483,114 +496,280 @@ namespace mattatz.TeddySystem.Example {
 					}
 				}
 
-				dt = Mathf.Min(dt, 0.03f); // cap timestep for stability
+				// ── Determine forced joints (dragged / animation playback) ───────
+				// We collect them once and pass to the FMS solver.
+				var forcedList     = new List<int>();
+				var forcedPosList  = new List<Vector3>();
 
-				for(int i = 0; i < worldJoints.Count; i++) {
-					// Pinned joints are frozen at their rest position – skip all dynamics
-					if (pinnedJoints.Contains(i)) {
-						worldJoints[i] = transform.TransformPoint(restLocalPositions[i]);
-						prevWorldJoints[i] = worldJoints[i];
-						continue;
-					}
-
-					if (i == draggingJoint) {
-						prevWorldJoints[i] = worldJoints[i];
-						continue;
-					}
-
-					if (isAnimationPlaying && recordedMotions.ContainsKey(i) && (!isRecordingAnim || i != animSelectedJoint)) {
+				if (draggingJoint >= 0 && draggingJoint < worldJoints.Count) {
+					forcedList.Add(draggingJoint);
+					forcedPosList.Add(worldJoints[draggingJoint]);
+				}
+				for (int i = 0; i < worldJoints.Count; i++) {
+					if (i == draggingJoint) continue;
+					if (isAnimationPlaying && recordedMotions.ContainsKey(i)
+					    && (!isRecordingAnim || i != animSelectedJoint)) {
 						int frame = animCurrentFrame;
-						if (frame >= recordedMotions[i].Count) frame = recordedMotions[i].Count - 1;
-						worldJoints[i] = recordedMotions[i][frame];
-						prevWorldJoints[i] = worldJoints[i];
-						continue;
+						if (frame >= recordedMotions[i].Count)
+							frame = recordedMotions[i].Count - 1;
+						forcedList.Add(i);
+						forcedPosList.Add(recordedMotions[i][frame]);
 					}
-
-					float jDamp  = (jointRegion != null && i < jointRegion.Length && jointRegion[i] >= 0)
-						? regionDamping[jointRegion[i]] : damping;
-					float jStiff = (jointRegion != null && i < jointRegion.Length && jointRegion[i] >= 0)
-						? regionStiffness[jointRegion[i]] : shapeStiffness;
-
-					Vector3 vel = (worldJoints[i] - prevWorldJoints[i]) / dt;
-					vel.y -= gravity * dt;
-					vel *= (1f - jDamp);
-
-					prevWorldJoints[i] = worldJoints[i];
-					Vector3 nextPos = worldJoints[i] + vel * dt;
-
-					Vector3 targetWorld = transform.TransformPoint(restLocalPositions[i]);
-					worldJoints[i] = Vector3.Lerp(nextPos, targetWorld, jStiff);
 				}
 
-				if (restLengths != null && boneIndices != null) {
-					int iterations = 30; // lower for performance on multiple puppets
-					float scale = transform.lossyScale.x;
-					for (int it = 0; it < iterations; it++) {
-						for (int i = 0; i < boneIndices.Count; i++) {
-							int i0 = boneIndices[i].x;
-							int i1 = boneIndices[i].y;
-							
-							Vector3 p0 = worldJoints[i0];
-							Vector3 p1 = worldJoints[i1];
-							Vector3 delta = p1 - p0;
-							float currentLen = delta.magnitude;
-							if (currentLen < 0.0001f) continue;
-							
-							float worldRestLength = restLengths[i] * scale;
-							float diff = (currentLen - worldRestLength) / currentLen;
-							Vector3 offset = delta * 0.5f * diff;
-							
-							if (i0 == draggingJoint) {
-								worldJoints[i1] -= offset * 2f;
-							} else if (i1 == draggingJoint) {
-								worldJoints[i0] += offset * 2f;
-							} else {
-								bool pin0c = pinnedJoints.Contains(i0);
-								bool pin1c = pinnedJoints.Contains(i1);
-								if (pin0c & pin1c) {
-									// both anchored - nothing moves
-								} else if (pin0c) {
-									worldJoints[i1] -= offset * 2f;
-								} else if (pin1c) {
-									worldJoints[i0] += offset * 2f;
-								} else {
-									worldJoints[i0] += offset;
-									worldJoints[i1] -= offset;
+				int[]     forcedArr  = forcedList.Count  > 0 ? forcedList.ToArray()  : null;
+				Vector3[] forcedPArr = forcedPosList.Count > 0 ? forcedPosList.ToArray() : null;
+
+				if (fmsSolver != null) {
+					// ── Fast Mass-Spring path ────────────────────────────────────
+
+					// Build pinned mask (pinnedJoints HashSet → bool[])
+					int jCount = worldJoints.Count;
+					if (fmsPinnedBuffer == null || fmsPinnedBuffer.Length != jCount)
+						fmsPinnedBuffer = new bool[jCount];
+					for (int i = 0; i < jCount; i++)
+						fmsPinnedBuffer[i] = pinnedJoints.Contains(i);
+					fmsSolver.SetPinned(fmsPinnedBuffer);
+
+					// ── Wake / sleep decision ────────────────────────────────────
+					// Wake if: a joint is being dragged, animation is playing,
+					//          or the object itself was moved (transform changed).
+					bool objectMoved = (transform.position - fmsPrevTransformPos).sqrMagnitude > 1e-8f;
+					bool hasDisturbance = draggingJoint >= 0 || isAnimationPlaying || objectMoved;
+
+					if (hasDisturbance) {
+						if (!fmsAwake) {
+							// Sync solver positions with current worldJoints before waking
+							SyncSolverFromWorld();
+							fmsSolver.ResetVelocities();
+							fmsAwake = true;
+						}
+						fmsSleepTimer = sleepDelay; // keep alive while interacting
+					} else if (fmsAwake) {
+						// Count down to sleep once motion settles
+						if (fmsSolver.MaxVelocitySqr() < sleepVelocityThreshold) {
+							fmsSleepTimer -= Time.deltaTime;
+							if (fmsSleepTimer <= 0f) {
+								fmsAwake = false;
+								fmsSolver.ResetVelocities();
+							}
+						} else {
+							fmsSleepTimer = sleepDelay; // still moving, reset countdown
+						}
+					}
+
+					fmsPrevTransformPos = transform.position;
+
+					if (fmsAwake) {
+						// ── Step the FMS solver ──────────────────────────────────
+						// Pinned joints: feed current rest-world positions as forced.
+						// This is already handled inside the solver via SetPinned().
+						// We only need to pass the explicitly forced (dragged/anim) joints.
+						//
+						// If the object moved we must re-seed pinned positions because
+						// rest positions are in local space; we update them in the solver
+						// by temporarily treating ALL pinned joints as forced too.
+						List<int>     allForced  = forcedList  != null ? new List<int>(forcedList)     : new List<int>();
+						List<Vector3> allForcedP = forcedPosList != null ? new List<Vector3>(forcedPosList) : new List<Vector3>();
+
+						for (int i = 0; i < jCount; i++) {
+							if (pinnedJoints.Contains(i)) {
+								allForced.Add(i);
+								allForcedP.Add(transform.TransformPoint(restLocalPositions[i]));
+							}
+						}
+
+						int[]     fa  = allForced.Count  > 0 ? allForced.ToArray()  : null;
+						Vector3[] fpa = allForcedP.Count > 0 ? allForcedP.ToArray() : null;
+
+						// Pass restStiffness to solver. The property setter will trigger a Cholesky
+						// rebuild if the value changes. This is now fully implicit and stable.
+						fmsSolver.RestStiffness = restStiffness;
+
+						Vector3[] restPosArr = null;
+						if (restStiffness > 0f) {
+							restPosArr = new Vector3[jCount];
+							for (int i = 0; i < jCount; i++)
+								restPosArr[i] = transform.TransformPoint(restLocalPositions[i]);
+						}
+
+						fmsSolver.Step(solverIterations, -gravity, damping, fa, fpa, restPosArr, restStiffness);
+
+						// Read back solver positions into worldJoints
+						for (int i = 0; i < jCount; i++) {
+							worldJoints[i] = fmsSolver.GetPosition(i);
+							prevWorldJoints[i] = worldJoints[i];
+						}
+
+						// ── PBD post-solve: hard-enforce rest lengths on ALL springs ─────
+						// The FMS solver enforces rest lengths softly via energy minimisation.
+						// With finite iterations, boundary edges (pinned ↔ free) can remain
+						// stretched. This PBD pass projects each spring to its exact rest
+						// length, guaranteeing convergence without touching the FMS matrix.
+						if (boneIndices != null && restLengths != null) {
+							float scl = transform.lossyScale.x;
+							for (int pbdIter = 0; pbdIter < 10; pbdIter++) {
+								for (int k = 0; k < boneIndices.Count; k++) {
+									int i0 = boneIndices[k].x;
+									int i1 = boneIndices[k].y;
+									bool pin0 = pinnedJoints.Contains(i0);
+									bool pin1 = pinnedJoints.Contains(i1);
+									bool drag0 = (i0 == draggingJoint);
+									bool drag1 = (i1 == draggingJoint);
+
+									// Both pinned or both dragged: skip (no DOF to correct)
+									if ((pin0 || drag0) && (pin1 || drag1)) continue;
+
+									float targetLen = restLengths[k] * scl;
+									Vector3 delta = worldJoints[i1] - worldJoints[i0];
+									float curLen = delta.magnitude;
+									if (curLen < 1e-6f) continue;
+
+									float diff = (curLen - targetLen) / curLen;
+									Vector3 correction = delta * diff;
+
+									// Distribute correction: fixed endpoint takes 0, free takes all
+									bool fixed0 = pin0 || drag0;
+									bool fixed1 = pin1 || drag1;
+									if      (fixed0 && !fixed1) worldJoints[i1] -= correction;
+									else if (fixed1 && !fixed0) worldJoints[i0] += correction;
+									else { worldJoints[i0] += correction * 0.5f; worldJoints[i1] -= correction * 0.5f; }
 								}
+							}
+							// Sync corrected positions back into the FMS solver so next frame
+							// starts from the corrected state (no drift accumulation).
+							// Use OverridePositions to preserve velocities (momentum continuity).
+							fmsSolver.OverridePositions(worldJoints);
+							for (int i = 0; i < jCount; i++) prevWorldJoints[i] = worldJoints[i];
+						}
+					} else {
+						// ── Solver asleep: freeze free joints at current position ─
+						// Pinned joints always track rest; dragged/anim joints track target.
+						for (int i = 0; i < jCount; i++) {
+							if (pinnedJoints.Contains(i)) {
+								worldJoints[i] = transform.TransformPoint(restLocalPositions[i]);
+								prevWorldJoints[i] = worldJoints[i];
+							}
+						}
+					}
+				} else {
+					// ── Legacy Verlet + PBD path (fmsSolver not yet initialised) ────
+					float dt = Mathf.Min(Time.deltaTime, 0.03f);
+					for (int i = 0; i < worldJoints.Count; i++) {
+						if (pinnedJoints.Contains(i)) {
+							worldJoints[i] = transform.TransformPoint(restLocalPositions[i]);
+							prevWorldJoints[i] = worldJoints[i]; continue;
+						}
+						if (i == draggingJoint) { prevWorldJoints[i] = worldJoints[i]; continue; }
+						if (forcedArr != null && System.Array.IndexOf(forcedArr, i) >= 0) {
+							worldJoints[i] = forcedPArr[System.Array.IndexOf(forcedArr, i)];
+							prevWorldJoints[i] = worldJoints[i]; continue;
+						}
+						float jDamp  = (jointRegion != null && i < jointRegion.Length && jointRegion[i] >= 0)
+							? regionDamping[jointRegion[i]] : damping;
+						float jStiff = (jointRegion != null && i < jointRegion.Length && jointRegion[i] >= 0)
+							? regionStiffness[jointRegion[i]] : shapeStiffness;
+						Vector3 vel = (worldJoints[i] - prevWorldJoints[i]) / dt;
+						vel.y -= gravity * dt;
+						vel *= (1f - jDamp);
+						prevWorldJoints[i] = worldJoints[i];
+						Vector3 nextPos = worldJoints[i] + vel * dt;
+						Vector3 targetWorld = transform.TransformPoint(restLocalPositions[i]);
+						worldJoints[i] = Vector3.Lerp(nextPos, targetWorld, jStiff);
+					}
+					if (restLengths != null && boneIndices != null) {
+						float scale = transform.lossyScale.x;
+						for (int it = 0; it < 30; it++) {
+							for (int i = 0; i < boneIndices.Count; i++) {
+								int i0 = boneIndices[i].x, i1 = boneIndices[i].y;
+								Vector3 delta = worldJoints[i1] - worldJoints[i0];
+								float cur = delta.magnitude;
+								if (cur < 0.0001f) continue;
+								float diff = (cur - restLengths[i] * scale) / cur;
+								Vector3 off = delta * 0.5f * diff;
+								bool pin0 = pinnedJoints.Contains(i0), pin1 = pinnedJoints.Contains(i1);
+								if      (i0 == draggingJoint) worldJoints[i1] -= off * 2f;
+								else if (i1 == draggingJoint) worldJoints[i0] += off * 2f;
+								else if (pin0 && pin1) {}
+								else if (pin0)  worldJoints[i1] -= off * 2f;
+								else if (pin1)  worldJoints[i0] += off * 2f;
+								else { worldJoints[i0] += off; worldJoints[i1] -= off; }
 							}
 						}
 					}
 				}
 
-				for(int i = 0; i < joints.Count; i++) {
+				// ── Sync local joints + deform mesh ─────────────────────────────
+				for (int i = 0; i < joints.Count; i++)
 					joints[i] = transform.InverseTransformPoint(worldJoints[i]);
-				}
 
 				var currentBones = new List<(Vector3, Vector3)>();
-				foreach (var bi in boneIndices) {
+				foreach (var bi in boneIndices)
 					currentBones.Add((joints[bi.x], joints[bi.y]));
-				}
 				skeletonBones = currentBones;
-				
+
 				Mesh mesh = filter.sharedMesh;
 				mesh.vertices = skinning.Deform(skeletonBones);
 				mesh.RecalculateNormals();
 				mesh.RecalculateBounds();
 
-				// Update collider if we are currently drawing on the surface 
-				// (needed for accurate hits on deformed mesh)
 				if (isBeingPainted) {
 					col.sharedMesh = null;
 					col.sharedMesh = mesh;
 				}
 			} else {
 				// Physics off: freeze all joints at rest positions
-				for(int i=0; i<joints.Count; i++) {
+				for (int i = 0; i < joints.Count; i++) {
 					if (i != draggingJoint) worldJoints[i] = transform.TransformPoint(restLocalPositions[i]);
 					joints[i] = restLocalPositions[i];
 					prevWorldJoints[i] = worldJoints[i];
 				}
 			}
+		}
+
+		// ── FMS Solver helpers ────────────────────────────────────────────────
+
+		/// <summary>
+		/// Build and initialise a fresh FMSSolver from the current skeleton
+		/// (joints, boneIndices, restLengths). Must be called after SetupSkeleton().
+		/// Rest lengths are in local space; the solver works in world space, so
+		/// we scale them by the object's lossy scale at construction time.
+		/// </summary>
+		void InitFMSSolver() {
+			if (joints == null || boneIndices == null || restLengths == null) return;
+			int n = joints.Count;
+			int s = boneIndices.Count;
+			if (n == 0 || s == 0) { fmsSolver = null; return; }
+
+			int[]   si     = new int[s];
+			int[]   sj     = new int[s];
+			float[] rl     = new float[s];
+			float[] stiffs = new float[s];
+			float   scale  = transform.lossyScale.x;
+
+			for (int k = 0; k < s; k++) {
+				si[k]     = boneIndices[k].x;
+				sj[k]     = boneIndices[k].y;
+				rl[k]     = restLengths[k] * scale;   // world-space rest length
+				stiffs[k] = springStiffness;
+			}
+
+			fmsSolver       = new FMSSolver(n, s, si, sj, rl, stiffs, nodeMass, fixedTimestep);
+			fmsAwake        = false;
+			fmsSleepTimer   = 0f;
+			fmsPrevTransformPos = transform.position;
+
+			// Seed solver positions with current world joint positions
+			SyncSolverFromWorld();
+		}
+
+		/// <summary>
+		/// Copy current worldJoints into the FMS solver's position arrays.
+		/// Called when waking from sleep or after a topology change.
+		/// </summary>
+		void SyncSolverFromWorld() {
+			if (fmsSolver == null || worldJoints == null) return;
+			fmsSolver.SetPositionsFromList(worldJoints);
 		}
 
 		public int lastClickX = -1;
@@ -921,6 +1100,8 @@ namespace mattatz.TeddySystem.Example {
 				skeletonBones.Add((joints[bi.x], joints[bi.y]));
 			if (filter.sharedMesh != null)
 				skinning = new HarmonicSkinning(filter.sharedMesh.vertices, filter.sharedMesh.triangles, skeletonBones);
+			// Rebuild FMS solver whenever bone topology changes
+			InitFMSSolver();
 		}
 
 		/// <summary>Total number of joints.</summary>
@@ -1037,6 +1218,9 @@ namespace mattatz.TeddySystem.Example {
 			regionStiffness.Clear();
 			regionDamping.Clear();
 			skinning = new HarmonicSkinning(filter.sharedMesh.vertices, filter.sharedMesh.triangles, skeletonBones);
+
+			// ── Initialise Fast Mass-Spring solver ───────────────────────────────
+			InitFMSSolver();
 		}
 
 		public void SetMesh (Mesh mesh) {
