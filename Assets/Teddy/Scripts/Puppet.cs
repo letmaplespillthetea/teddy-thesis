@@ -327,25 +327,6 @@ namespace mattatz.TeddySystem.Example {
 		List<Vector3> worldJoints;
 		List<Vector3> prevWorldJoints;
 		HarmonicSkinning skinning;
-
-		// ── Fast Mass-Spring Solver state ──────────────────────────────────────
-		// All matrices are stored as flat double arrays in row-major order.
-		// Dimension key: n = joint count, s = spring (bone) count, N = 3n, S = 3s.
-		double[] msVelocities;   // 3n: velocity per node-coordinate
-		double[] msL;            // N x N: Laplacian stiffness matrix
-		double[] msJ;            // N x S: spring incidence matrix
-		double[] msA;            // N x N: system matrix A = M + h²L (modified for pins)
-		double[] msCholeskyL;    // N x N: lower-triangular Cholesky factor of msA
-		double[] msD;            // 3s: local spring direction vectors
-		double[] msMdiag;        // N: diagonal of mass matrix M
-		bool     msMatricesDirty = true;  // rebuild A + Cholesky on next step
-		float    msLastH         = -1f;   // h used when matrices were last built
-		float    msLastStiffness = -1f;   // springStiffness used when matrices were last built
-		float    msLastShapeStiffness = -1f; // shapeStiffness used when matrices were last built
-		float    msLastMass      = -1f;   // nodeMass used when matrices were last built
-		int      msLastDraggingJoint = -1; // draggingJoint used when matrices were last built
-		Matrix4x4 msPrevLocalToWorld;     // to track whole-object movement
-
 		// Lasso Joints: indices of joints that are pinned (non-interactable)
 		HashSet<int> pinnedJoints   = new HashSet<int>();
 		// Joints that have been explicitly included by at least one lasso draw.
@@ -644,19 +625,6 @@ namespace mattatz.TeddySystem.Example {
 			}
 		}
 
-		public void ResetEditMode() {
-			if (mainTexture != null && backupPixels != null) {
-				Array.Copy(backupPixels, appliedPixels, backupPixels.Length);
-				Array.Copy(backupPixels, currentWorkingPixels, backupPixels.Length);
-				mainTexture.SetPixels32(currentWorkingPixels);
-				mainTexture.Apply();
-				if (previewRegionIndices != null) previewRegionIndices.Clear();
-				if (boundaryIndices != null) boundaryIndices.Clear();
-				isPreviewingColor = false;
-				lastClickX = -1; lastClickY = -1;
-			}
-		}
-
 		public void ApplyColorToLastClick(Color32 newColor) { 
 			if (mainTexture == null || previewRegionIndices == null || previewRegionIndices.Count == 0) return;
 			// Commit only the filled color, NOT the orange boundary outline!
@@ -782,18 +750,6 @@ namespace mattatz.TeddySystem.Example {
 		}
 
 		public Vector3 dragOffsetWorld;
-
-		/// <summary>Returns the index of the joint closest to a given world position.</summary>
-		public int GetClosestJoint(Vector3 worldPos) {
-			if (worldJoints == null || worldJoints.Count == 0) return -1;
-			int bestIdx = -1;
-			float minD = float.MaxValue;
-			for (int i = 0; i < worldJoints.Count; i++) {
-				float d = Vector3.Distance(worldJoints[i], worldPos);
-				if (d < minD) { minD = d; bestIdx = i; }
-			}
-			return bestIdx;
-		}
 
 		public bool TryPickJoint(Camera cam, Vector2 mousePos, float pixelRadius, out int jointIndex) {
 			jointIndex = -1;
@@ -926,7 +882,6 @@ namespace mattatz.TeddySystem.Example {
 				}
 			}
 
-			msMatricesDirty = true;  // topology changed – rebuild solver matrices
 			RebuildSkeletonBones();
 		}
 
@@ -940,7 +895,6 @@ namespace mattatz.TeddySystem.Example {
 				if ((bi.x == i0 && bi.y == i1) || (bi.x == i1 && bi.y == i0)) return;
 			boneIndices.Add(new Vector2Int(i0, i1));
 			restLengths.Add(Vector3.Distance(joints[i0], joints[i1]));
-			msMatricesDirty = true;  // topology changed – rebuild solver matrices
 			RebuildSkeletonBones();
 		}
 
@@ -953,12 +907,6 @@ namespace mattatz.TeddySystem.Example {
 				skeletonBones.Add((joints[bi.x], joints[bi.y]));
 			if (filter.sharedMesh != null)
 				skinning = new HarmonicSkinning(filter.sharedMesh.vertices, filter.sharedMesh.triangles, skeletonBones);
-		}
-
-		/// <summary>Returns the joint local-space position, or Vector3.zero if invalid.</summary>
-		public Vector3 GetJointLocalPos(int idx) {
-			if (joints == null || idx < 0 || idx >= joints.Count) return Vector3.zero;
-			return joints[idx];
 		}
 
 		/// <summary>Total number of joints.</summary>
@@ -1004,7 +952,6 @@ namespace mattatz.TeddySystem.Example {
 				}
 				// else: already in a prior region — leave untouched
 			}
-			msMatricesDirty = true;  // pinned set changed – rebuild system matrix
 			return newRegion;
 		}
 
@@ -1026,17 +973,6 @@ namespace mattatz.TeddySystem.Example {
 			if (region < 0 || region >= regionStiffness.Count) return;
 			regionStiffness[region] = stiffness;
 			regionDamping[region]   = damp;
-		}
-
-		/// <summary>Unpin all joints, clear all regions and lasso history.</summary>
-		public void ResetLasso() {
-			pinnedJoints.Clear();
-			lassoIncluded.Clear();
-			regionStiffness.Clear();
-			regionDamping.Clear();
-			if (jointRegion != null)
-				for (int i = 0; i < jointRegion.Length; i++) jointRegion[i] = -1;
-			msMatricesDirty = true;  // pinned set cleared – rebuild system matrix
 		}
 
 		/// <summary>Even-odd ray cast point-in-polygon test (2-D screen space).</summary>
@@ -1086,12 +1022,6 @@ namespace mattatz.TeddySystem.Example {
 			for (int i = 0; i < joints.Count; i++) jointRegion[i] = -1;
 			regionStiffness.Clear();
 			regionDamping.Clear();
-
-			// Initialise solver velocity buffer (zero initial velocities)
-			msVelocities = new double[3 * joints.Count];
-			msMatricesDirty = true;
-			msPrevLocalToWorld = transform.localToWorldMatrix;
-
 			skinning = new HarmonicSkinning(filter.sharedMesh.vertices, filter.sharedMesh.triangles, skeletonBones);
 		}
 
@@ -1192,300 +1122,6 @@ namespace mattatz.TeddySystem.Example {
 				result.Add((jlist[e.x], jlist[e.y]));
 			}
 			return result;
-		}
-
-		// ══════════════════════════════════════════════════════════════════════
-		// Fast Mass-Spring Solver – Liu et al. 2013
-		// "Fast Simulation of Mass-Spring Systems", SIGGRAPH Asia 2013
-		// ══════════════════════════════════════════════════════════════════════
-
-		/// <summary>
-		/// Algorithm 1 – Construct matrices L, J, M and precompute A = M + h²L.
-		/// Also performs Cholesky factorisation of A for the global step.
-		/// Called once after topology or timestep changes (msMatricesDirty).
-		/// </summary>
-		void BuildMassSpringMatrices(float h) {
-			int n = worldJoints.Count;
-			int s = boneIndices.Count;
-			if (n == 0 || s == 0) return;
-
-			int N = 3 * n;   // total DOFs
-			int S = 3 * s;   // spring DOF count
-			double h2 = (double)h * h;
-			double k  = (double)springStiffness;
-			double m  = (double)nodeMass;
-
-			// ── Initialise arrays ────────────────────────────────────────────────
-			msL    = new double[N * N];   // Laplacian (symmetric, sparse)
-			msJ    = new double[N * S];   // Incidence matrix
-			msMdiag = new double[N];       // Diagonal of mass matrix M
-			msD    = new double[S];        // Spring direction vectors (updated each local step)
-
-			// ── Ensure velocity buffer matches current joint count ───────────────
-			if (msVelocities == null || msVelocities.Length != N)
-				msVelocities = new double[N];
-
-			// ── Mass matrix M (diagonal) ─────────────────────────────────────────
-			for (int i = 0; i < n; i++)
-				for (int d = 0; d < 3; d++)
-					msMdiag[3*i + d] = m;
-
-			// ── Laplacian L and incidence matrix J (Algorithm 1) ─────────────────
-			// For each spring k connecting nodes (i, j):
-			//   L[3i+d, 3i+d] += k_k,  L[3j+d, 3j+d] += k_k
-			//   L[3i+d, 3j+d] -= k_k,  L[3j+d, 3i+d] -= k_k
-			//   J[3i+d, 3k+d] += k_k,  J[3j+d, 3k+d] -= k_k
-			for (int sk = 0; sk < s; sk++) {
-				int ni = boneIndices[sk].x;
-				int nj = boneIndices[sk].y;
-				for (int d = 0; d < 3; d++) {
-					int ri = 3*ni + d;
-					int rj = 3*nj + d;
-					// Laplacian entries
-					msL[ri*N + ri] += k;
-					msL[rj*N + rj] += k;
-					msL[ri*N + rj] -= k;
-					msL[rj*N + ri] -= k;
-					// Incidence entries
-					int csk = 3*sk + d;
-					msJ[ri*S + csk] += k;
-					msJ[rj*S + csk] -= k;
-				}
-			}
-
-			// ── A = M + h²L + h²K_shape ──────────────────────────────────────────
-			double k_shape = (double)shapeStiffness * 500.0;
-			msA = new double[N * N];
-			for (int r = 0; r < N; r++)
-				for (int c = 0; c < N; c++)
-					msA[r*N + c] = (r == c ? msMdiag[r] + h2 * k_shape : 0.0) + h2 * msL[r*N + c];
-
-			// ── Enforce pinned joints via row/col elimination ─────────────────────
-			// Set diagonal = 1, all off-diagonal entries in that row/col = 0.
-			// RHS will be set to the target position during GlobalStep.
-			foreach (int pi in pinnedJoints) {
-				for (int d = 0; d < 3; d++) {
-					int row = 3*pi + d;
-					for (int c = 0; c < N; c++) { msA[row*N + c] = 0.0; msA[c*N + row] = 0.0; }
-					msA[row*N + row] = 1.0;
-				}
-			}
-			// Dragging joint treated similarly (its position is externally driven)
-			if (draggingJoint >= 0 && draggingJoint < n) {
-				for (int d = 0; d < 3; d++) {
-					int row = 3*draggingJoint + d;
-					for (int c = 0; c < N; c++) { msA[row*N + c] = 0.0; msA[c*N + row] = 0.0; }
-					msA[row*N + row] = 1.0;
-				}
-			}
-
-			// ── Precompute Cholesky factorisation of A ───────────────────────────
-			msCholeskyL = new double[N * N];
-			bool ok = CholeskyDecompose(msA, msCholeskyL, N);
-			if (!ok) {
-				// Fallback: add regularisation and retry
-				for (int r = 0; r < N; r++) msA[r*N + r] += 1e-6;
-				CholeskyDecompose(msA, msCholeskyL, N);
-			}
-
-			msMatricesDirty = false;
-			msLastH         = h;
-			msLastStiffness = springStiffness;
-			msLastShapeStiffness = shapeStiffness;
-			msLastMass      = nodeMass;
-			msLastDraggingJoint = draggingJoint;
-		}
-
-		/// <summary>
-		/// Run one complete mass-spring timestep:
-		/// solverIterations × (Local Step + Global Step).
-		/// </summary>
-		void MassSpringStep(float h) {
-			int n = worldJoints.Count;
-			if (n == 0 || msCholeskyL == null) return;
-
-			double h2 = (double)h * h;
-
-			// Copy world positions into a working flat array x (3n)
-			double[] x = new double[3*n];
-			for (int i = 0; i < n; i++) {
-				x[3*i]   = worldJoints[i].x;
-				x[3*i+1] = worldJoints[i].y;
-				x[3*i+2] = worldJoints[i].z;
-			}
-
-			// ── Compute inertia prediction y = x_n + h*v + h²*f_ext/m ───────────
-			// Gravity acts as external force in -y direction
-			double[] y = new double[3*n];
-			for (int i = 0; i < n; i++) {
-				y[3*i]   = x[3*i]   + h * msVelocities[3*i];
-				y[3*i+1] = x[3*i+1] + h * msVelocities[3*i+1] - h2 * gravity;
-				y[3*i+2] = x[3*i+2] + h * msVelocities[3*i+2];
-			}
-
-			// ── Fixed-iteration local/global loop (Algorithm 4) ──────────────────
-			int iters = Mathf.Max(1, solverIterations);
-			for (int iter = 0; iter < iters; iter++) {
-				// Local step: update spring direction vectors d (Algorithm 2)
-				LocalStep(x);
-				// Global step: solve (M + h²L)x = h²Jd + My (Algorithm 3)
-				GlobalStep(x, y, h2);
-			}
-
-			// ── Apply damping and update velocities v = (x_new - x_old) / h ─────
-			double dampFactor = 1.0 - (double)damping;
-			for (int i = 0; i < n; i++) {
-				if (pinnedJoints.Contains(i) || i == draggingJoint) {
-					msVelocities[3*i]   = 0;
-					msVelocities[3*i+1] = 0;
-					msVelocities[3*i+2] = 0;
-					continue;
-				}
-				msVelocities[3*i]   = dampFactor * (x[3*i]   - worldJoints[i].x) / h;
-				msVelocities[3*i+1] = dampFactor * (x[3*i+1] - worldJoints[i].y) / h;
-				msVelocities[3*i+2] = dampFactor * (x[3*i+2] - worldJoints[i].z) / h;
-			}
-
-			// ── Write solved positions back to worldJoints ────────────────────────
-			for (int i = 0; i < n; i++) {
-				if (pinnedJoints.Contains(i)) continue;  // pinned joints handled separately
-				if (i == draggingJoint)       continue;  // dragging joint driven externally
-				worldJoints[i] = new Vector3((float)x[3*i], (float)x[3*i+1], (float)x[3*i+2]);
-			}
-		}
-
-		/// <summary>
-		/// Algorithm 2 – Local step: compute spring direction vectors d.
-		/// For each spring k connecting (i, j):
-		///   d_k = r_k * normalize(p_i - p_j)
-		/// where r_k is the rest length.
-		/// </summary>
-		void LocalStep(double[] x) {
-			int s = boneIndices.Count;
-			for (int sk = 0; sk < s; sk++) {
-				int ni = boneIndices[sk].x;
-				int nj = boneIndices[sk].y;
-
-				// Displacement vector p12 = p_i - p_j
-				double dx = x[3*ni]   - x[3*nj];
-				double dy = x[3*ni+1] - x[3*nj+1];
-				double dz = x[3*ni+2] - x[3*nj+2];
-				double len = System.Math.Sqrt(dx*dx + dy*dy + dz*dz);
-
-				// Normalise and scale by rest length r_k
-				double r = (double)restLengths[sk];
-				if (len > 1e-10) {
-					double scale = r / len;
-					msD[3*sk]   = dx * scale;
-					msD[3*sk+1] = dy * scale;
-					msD[3*sk+2] = dz * scale;
-				} else {
-					// Degenerate: spring fully collapsed – use rest direction (0,r,0)
-					msD[3*sk]   = 0;
-					msD[3*sk+1] = r;
-					msD[3*sk+2] = 0;
-				}
-			}
-		}
-
-		/// <summary>
-		/// Algorithm 3 – Global step: solve the linear system
-		///   (M + h²L) x = h²·J·d + M·y
-		/// using the precomputed Cholesky factorisation.
-		/// Pinned and dragged joint rows are overridden with their target positions.
-		/// </summary>
-		void GlobalStep(double[] x, double[] y, double h2) {
-			int n = worldJoints.Count;
-			int N = 3 * n;
-			int s = boneIndices.Count;
-			int S = 3 * s;
-
-			// ── Compute RHS = h²·J·d + M·y + h²·K_shape·target ──────────────────
-			// (equivalent to h²Jd - b where b = -My, see thesis eq.)
-			double[] rhs = new double[N];
-			double k_shape = (double)shapeStiffness * 500.0;
-			// Add M·y contribution and soft shape-matching anchors
-			for (int i = 0; i < n; i++) {
-				Vector3 target = transform.TransformPoint(restLocalPositions[i]);
-				for (int d = 0; d < 3; d++) {
-					int r = 3*i + d;
-					rhs[r] = msMdiag[r] * y[r];
-					// Soft anchor to rest frame (provides global stability and jiggle when dragging)
-					rhs[r] += h2 * k_shape * (d == 0 ? target.x : (d == 1 ? target.y : target.z));
-				}
-			}
-			// Add h²·J·d contribution (J is N×S)
-			for (int r = 0; r < N; r++)
-				for (int c = 0; c < S; c++)
-					rhs[r] += h2 * msJ[r*S + c] * msD[c];
-
-			// ── Override RHS for pinned joints ───────────────────────────────────
-			foreach (int pi in pinnedJoints) {
-				Vector3 target = transform.TransformPoint(restLocalPositions[pi]);
-				rhs[3*pi]   = target.x;
-				rhs[3*pi+1] = target.y;
-				rhs[3*pi+2] = target.z;
-			}
-			// Override RHS for dragged joint
-			if (draggingJoint >= 0 && draggingJoint < n) {
-				rhs[3*draggingJoint]   = worldJoints[draggingJoint].x;
-				rhs[3*draggingJoint+1] = worldJoints[draggingJoint].y;
-				rhs[3*draggingJoint+2] = worldJoints[draggingJoint].z;
-			}
-
-			// ── Solve A·x_new = rhs using Cholesky L·L^T ────────────────────────
-			double[] result = new double[N];
-			SolveCholesky(msCholeskyL, rhs, N, result);
-
-			// Write result back into x
-			System.Array.Copy(result, x, N);
-		}
-
-		/// <summary>
-		/// Cholesky-Banachiewicz decomposition: A = L·L^T (in-place into output).
-		/// A must be symmetric positive definite (N×N, row-major).
-		/// Returns false if decomposition fails (non-SPD matrix).
-		/// </summary>
-		static bool CholeskyDecompose(double[] A, double[] L, int N) {
-			System.Array.Clear(L, 0, N * N);
-			for (int i = 0; i < N; i++) {
-				for (int j = 0; j <= i; j++) {
-					double sum = A[i*N + j];
-					for (int kk = 0; kk < j; kk++)
-						sum -= L[i*N + kk] * L[j*N + kk];
-					if (i == j) {
-						if (sum <= 0.0) return false;  // not SPD
-						L[i*N + j] = System.Math.Sqrt(sum);
-					} else {
-						L[i*N + j] = sum / L[j*N + j];
-					}
-				}
-			}
-			return true;
-		}
-
-		/// <summary>
-		/// Solve A·x = b where A = L·L^T (Cholesky) using forward/back substitution.
-		/// L is the lower-triangular Cholesky factor (N×N, row-major).
-		/// </summary>
-		static void SolveCholesky(double[] L, double[] b, int N, double[] x) {
-			// Forward substitution: solve L·y = b
-			double[] tmp = new double[N];
-			for (int i = 0; i < N; i++) {
-				double sum = b[i];
-				for (int j = 0; j < i; j++)
-					sum -= L[i*N + j] * tmp[j];
-				double diag = L[i*N + i];
-				tmp[i] = (System.Math.Abs(diag) > 1e-15) ? sum / diag : 0.0;
-			}
-			// Back substitution: solve L^T·x = y
-			for (int i = N-1; i >= 0; i--) {
-				double sum = tmp[i];
-				for (int j = i+1; j < N; j++)
-					sum -= L[j*N + i] * x[j];  // L^T[i,j] = L[j,i]
-				double diag = L[i*N + i];
-				x[i] = (System.Math.Abs(diag) > 1e-15) ? sum / diag : 0.0;
-			}
 		}
 
 		static Material lineMaterial;

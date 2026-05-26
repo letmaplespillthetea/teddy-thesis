@@ -53,10 +53,7 @@ namespace mattatz.TeddySystem.Example {
 		[SerializeField, Range(0.1f, 2f)] float inflationAmount = 1.0f;
 		[SerializeField] bool smoothHeightFields = true;
 
-		[Header("Domain Stitching (Advanced)")]
-		[SerializeField] bool useDomainStitching = false;
-		[SerializeField] bool useFullPipeline = false; // Enable Phases 2-5
-		[SerializeField] bool useARAPLayering = false; // Enable Phase 5 (ARAP-L)
+		[SerializeField] bool useDomainStitching = true;
 
 		OperationMode mode;
 
@@ -777,124 +774,6 @@ void BuildWithDomainStitching () {
 }
 
 	/// <summary>
-	/// Extract boundary from a 2D mesh (vertices + triangles)
-	/// Finds all edges that belong to only one triangle (boundary edges)
-	/// </summary>
-	List<Vector2> ExtractBoundaryFromMesh(List<Vector2> vertices, List<int> triangles) {
-		if (vertices == null || triangles == null || triangles.Count < 3) {
-			Debug.LogWarning("[ExtractBoundary] Invalid mesh data");
-			return null;
-		}
-
-		Debug.Log($"[ExtractBoundary] Processing {vertices.Count} vertices, {triangles.Count / 3} triangles");
-
-		// Count edge occurrences (boundary edges appear only once)
-		Dictionary<(int, int), int> edgeCount = new Dictionary<(int, int), int>();
-
-		for (int i = 0; i < triangles.Count; i += 3) {
-			int v0 = triangles[i];
-			int v1 = triangles[i + 1];
-			int v2 = triangles[i + 2];
-
-			// Validate indices
-			if (v0 < 0 || v0 >= vertices.Count || v1 < 0 || v1 >= vertices.Count || v2 < 0 || v2 >= vertices.Count) {
-				Debug.LogWarning($"[ExtractBoundary] Invalid triangle indices: {v0}, {v1}, {v2}");
-				continue;
-			}
-
-			// Add 3 edges (order matters: use min,max to normalize)
-			AddEdge(edgeCount, v0, v1);
-			AddEdge(edgeCount, v1, v2);
-			AddEdge(edgeCount, v2, v0);
-		}
-
-		// Find boundary edges (count == 1)
-		List<(int, int)> boundaryEdges = new List<(int, int)>();
-		foreach (var kvp in edgeCount) {
-			if (kvp.Value == 1) {
-				boundaryEdges.Add(kvp.Key);
-			}
-		}
-
-		if (boundaryEdges.Count == 0) {
-			Debug.LogWarning("[ExtractBoundary] No boundary edges found!");
-			return null;
-		}
-
-		Debug.Log($"[ExtractBoundary] Found {boundaryEdges.Count} boundary edges");
-
-		// Sort edges to form a continuous loop
-		List<int> boundaryIndices = new List<int>();
-		var edgeDict = new Dictionary<int, List<int>>();
-		foreach (var (a, b) in boundaryEdges) {
-			if (!edgeDict.ContainsKey(a)) edgeDict[a] = new List<int>();
-			if (!edgeDict.ContainsKey(b)) edgeDict[b] = new List<int>();
-			edgeDict[a].Add(b);
-			edgeDict[b].Add(a);
-		}
-
-		// Start from any boundary vertex
-		int current = boundaryEdges[0].Item1;
-		int start = current;
-		boundaryIndices.Add(current);
-
-		int maxIterations = vertices.Count * 2; // Safety limit
-		int iterations = 0;
-
-		while (iterations < maxIterations) {
-			iterations++;
-
-			if (!edgeDict.ContainsKey(current)) {
-				Debug.LogWarning($"[ExtractBoundary] Current vertex {current} not in edge dict!");
-				break;
-			}
-
-			var neighbors = edgeDict[current];
-			int next = -1;
-			foreach (var n in neighbors) {
-				if (boundaryIndices.Count == 1 || n != boundaryIndices[boundaryIndices.Count - 2]) {
-					next = n;
-					break;
-				}
-			}
-
-			if (next < 0) {
-				Debug.LogWarning($"[ExtractBoundary] No next vertex found at iteration {iterations}");
-				break;
-			}
-
-			if (next == start) {
-				Debug.Log($"[ExtractBoundary] Loop closed at iteration {iterations}");
-				break;
-			}
-
-			boundaryIndices.Add(next);
-			current = next;
-		}
-
-		if (iterations >= maxIterations) {
-			Debug.LogError($"[ExtractBoundary] Hit max iterations ({maxIterations})! Possible infinite loop.");
-		}
-
-		// Convert indices to positions
-		List<Vector2> boundary = new List<Vector2>();
-		foreach (var idx in boundaryIndices) {
-			if (idx >= 0 && idx < vertices.Count) {
-				boundary.Add(vertices[idx]);
-			}
-		}
-
-		Debug.Log($"[ExtractBoundary] Extracted {boundary.Count} boundary points from {vertices.Count} vertices");
-		return boundary;
-	}
-
-	void AddEdge(Dictionary<(int, int), int> dict, int a, int b) {
-		var key = a < b ? (a, b) : (b, a);
-		if (!dict.ContainsKey(key)) dict[key] = 0;
-		dict[key]++;
-	}
-
-	/// <summary>
 	/// Phase 1: Extract outer contour from multiple sketches via rasterization
 	/// </summary>
 	List<Vector2> ExtractOuterContour(List<List<Vector2>> contours) {
@@ -1286,15 +1165,10 @@ void BuildWithDomainStitching () {
 			// ── Right Side Panels ────────────────────────────────────────────
 
 			// -- Mesh Generation Panel (always shown) --
-			DrawPanel(new Rect(Screen.width - 210, 5, 200, 140), "─ Mesh Generation ─");
+			DrawPanel(new Rect(Screen.width - 210, 5, 200, 110), "─ Mesh Generation ─");
 			GUI.Label(new Rect(Screen.width - 200, 30, 180, 16), "Inflation: " + inflationAmount.ToString("F2"), labelStyle);
 			inflationAmount = GUI.HorizontalSlider(new Rect(Screen.width - 200, 50, 180, 18), inflationAmount, 0.1f, 2f);
 			smoothHeightFields = GUI.Toggle(new Rect(Screen.width - 200, 75, 180, 20), smoothHeightFields, " Smooth Mesh");
-			bool prevStitching = useDomainStitching;
-			useDomainStitching = GUI.Toggle(new Rect(Screen.width - 200, 100, 180, 20), useDomainStitching, " Domain Stitching");
-			if (prevStitching != useDomainStitching) {
-				Debug.Log($"Domain Stitching: {(useDomainStitching ? "ON" : "OFF")}");
-			}
 
 			// -- Interaction Modes Panel (always shown) --
 			DrawPanel(new Rect(Screen.width - 210, 150, 200, 115), "─ Interaction Modes ─");
@@ -1546,6 +1420,7 @@ void BuildWithDomainStitching () {
 			// 6. Set as the current active sketch (Auto-pass logic)
 			points = refinedResult;
 			multiPartContours.Clear();
+			sketchTextureDirty = true;
 			
 			Debug.Log($"[Refine] Merged {contours.Count} sketches into 1 contour with {points.Count} points.");
 		}
