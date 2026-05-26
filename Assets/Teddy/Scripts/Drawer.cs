@@ -1165,10 +1165,11 @@ void BuildWithDomainStitching () {
 			// ── Right Side Panels ────────────────────────────────────────────
 
 			// -- Mesh Generation Panel (always shown) --
-			DrawPanel(new Rect(Screen.width - 210, 5, 200, 110), "─ Mesh Generation ─");
+			DrawPanel(new Rect(Screen.width - 210, 5, 200, 135), "─ Mesh Generation ─");
 			GUI.Label(new Rect(Screen.width - 200, 30, 180, 16), "Inflation: " + inflationAmount.ToString("F2"), labelStyle);
 			inflationAmount = GUI.HorizontalSlider(new Rect(Screen.width - 200, 50, 180, 18), inflationAmount, 0.1f, 2f);
 			smoothHeightFields = GUI.Toggle(new Rect(Screen.width - 200, 75, 180, 20), smoothHeightFields, " Smooth Mesh");
+			showSkeleton = GUI.Toggle(new Rect(Screen.width - 200, 100, 180, 20), showSkeleton, " Show Skeleton");
 
 			// -- Interaction Modes Panel (always shown) --
 			DrawPanel(new Rect(Screen.width - 210, 150, 200, 115), "─ Interaction Modes ─");
